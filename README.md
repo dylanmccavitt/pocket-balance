@@ -6,7 +6,7 @@ A native drum mixer for FL Studio and other hosts with multiple plugin inputs.
 The plugin suggests levels. You keep control of the mix.
 
 Download the [0.3.0 prerelease for Mac or Windows](https://github.com/dylanmccavitt/pocket-balance/releases/tag/v0.3.0).
-Version 0.4.0 is undergoing host validation. See the [0.3 validation record](docs/validation-0.3.md) for the previous release.
+Version 0.4.0 is undergoing [host validation](docs/validation-0.4.md). See the [0.3 validation record](docs/validation-0.3.md) for the previous release.
 
 ![Frequency clash analysis and reversible preview](docs/frequency-clashes.png)
 
