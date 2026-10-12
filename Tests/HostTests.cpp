@@ -459,7 +459,7 @@ void captureClashLoop(PocketBalanceProcessor& p, double rate = 48000)
 void testClashWorkflow()
 {
     PocketBalanceProcessor p;
-    require(p.getParameters().size() == 73, "Five clash parameters append to the original 68");
+    require(p.getParameters().size() == 75, "Source transport appends to the 73 existing parameters");
     auto* originalLast = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[67]);
     require(originalLast && originalLast->paramID == "guard", "Existing parameter order remains unchanged");
     p.setParameterValue("guard", 0); p.setParameterValue("output", 0); p.prepareToPlay(48000, 511);
@@ -546,6 +546,30 @@ void testClashWorkflow()
     captureClashLoop(p);
     require(p.applyBalance() && !p.hasFreshClashCapture(), "Applying balance requires recapturing frequency evidence");
 }
+
+void testSourceSyncProbe()
+{
+    PocketBalanceProcessor p;
+    auto* packet = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[73]);
+    auto* ack = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[74]);
+    require(packet && packet->paramID == "source_sync_packet" && ack && ack->paramID == "source_sync_ack",
+            "Transport parameters append with stable IDs");
+    require(!packet->isAutomatable() && !ack->isAutomatable()
+        && ack->getCategory() == juce::AudioProcessorParameter::otherMeter,
+        "Transport is not automatable and acknowledgement is a meter");
+    const float value = float(0xabcdef) / 16777216.0f;
+    packet->setValue(value);
+    near(ack->getValue(), 0, 0, "Packet setter does not run message-thread work");
+    juce::Thread::sleep(75);
+    juce::Timer::callPendingTimersSynchronously();
+    near(ack->getValue(), value, 0, "Message-thread timer echoes an exact 24-bit word");
+    ack->setValue(0);
+    near(ack->getValue(), value, 0, "Host cannot write acknowledgement");
+    juce::MemoryBlock state; p.getStateInformation(state);
+    PocketBalanceProcessor restored; restored.setStateInformation(state.getData(), int(state.getSize()));
+    near(restored.getParameters()[73]->getValue(), 0, 0, "Packets are not saved in project state");
+    near(restored.getParameters()[74]->getValue(), 0, 0, "Acknowledgements are not saved in project state");
+}
 }
 
 int main(int argc, char** argv)
@@ -559,6 +583,7 @@ int main(int argc, char** argv)
     testAsyncDropdownRefresh();
     testMixedRoutingAndRates();
     testClashWorkflow();
+    testSourceSyncProbe();
     PocketBalanceProcessor p;
     require(p.getBusCount(true) == 16 && p.getTotalNumInputChannels() == 32, "Expose 16 stereo input buses");
     require(p.getTotalNumOutputChannels() == 2, "Expose one stereo output");

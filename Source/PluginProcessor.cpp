@@ -65,6 +65,18 @@ PocketBalanceProcessor::PocketBalanceProcessor()
     int ci = 0;
     for (const auto* id : { "clash_enabled", "clash_source", "clash_trigger", "clash_band", "clash_depth" })
         clashParameters[size_t(ci++)] = parameters.getRawParameterValue(id);
+    // Preserve all 73 existing parameter indices. These two are not serialized.
+    addParameter(sourceSyncPacket = new SourceSyncParameter(false));
+    addParameter(sourceSyncAck = new SourceSyncParameter(true));
+    startTimerHz(30);
+}
+
+PocketBalanceProcessor::~PocketBalanceProcessor() { stopTimer(); }
+
+void PocketBalanceProcessor::timerCallback()
+{
+    std::uint32_t word = 0;
+    if (sourceSyncPacket->takePacket(word)) sourceSyncAck->publishAcknowledgement(word);
 }
 
 bool PocketBalanceProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const

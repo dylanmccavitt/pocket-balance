@@ -5,12 +5,14 @@
 #include "BalanceEngine.h"
 #include "WaveformHistory.h"
 #include "ClashEngine.h"
+#include "SourceSyncParameter.h"
 #include <atomic>
 
-class PocketBalanceProcessor : public juce::AudioProcessor
+class PocketBalanceProcessor : public juce::AudioProcessor, private juce::Timer
 {
 public:
     PocketBalanceProcessor();
+    ~PocketBalanceProcessor() override;
     void prepareToPlay(double, int) override;
     void releaseResources() override {}
     bool isBusesLayoutSupported(const BusesLayout&) const override;
@@ -67,6 +69,9 @@ public:
     bool popScopeFrame(pocket::ScopeFrame& frame) noexcept { return scope.pop(frame); }
 
 private:
+    void timerCallback() override;
+    SourceSyncParameter* sourceSyncPacket = nullptr;
+    SourceSyncParameter* sourceSyncAck = nullptr;
     static BusesProperties makeBuses();
     static std::uint32_t packClash(const pocket::ClashConfig&);
     static pocket::ClashConfig unpackClash(std::uint32_t);
