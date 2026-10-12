@@ -32,9 +32,9 @@ Use additional instances for more than 16 sources. Each instance balances its ow
 
 Mac VST3, Audio Unit, and standalone targets are provided. The Mac build targets Apple Silicon and Intel.
 Windows VST3 and standalone targets use the same source, with a native Windows build script.
-Version 0.3.0 passes native Mac universal and Windows x64 builds, with four CTest suites on each platform.
-The Mac VST3 and AU also pass pluginval strictness 5.
-See [validation details](docs/validation-0.3.md) and [GitHub Actions](https://github.com/dylanmccavitt/pocket-balance/actions) for platform results and limits.
+Version 0.4.0 passes native Mac universal and Windows x64 builds, with five CTest suites and 28 companion tests on each platform.
+The installed Mac VST3 and AU also pass pluginval strictness 5, including editor checks.
+See [validation details](docs/validation-0.4.md) and [GitHub Actions](https://github.com/dylanmccavitt/pocket-balance/actions) for platform results and limits.
 The standalone application is for development and audio-interface inputs; it does not receive tracks from another DAW.
 
 Processor tests cover stereo and mono inputs, disabled buses, summing, mute, solo, bypass, capture, state recall, and undo.
@@ -98,7 +98,7 @@ After building and validating this update, save the FL Studio project and close 
 The included `scripts/Deploy-Windows.ps1` refuses to run while FL Studio is open; it does not close the host or save projects automatically.
 It stages and hash-checks the new bundle, preserves the complete previous installation in a uniquely named folder under `backups/`, and then replaces the installed bundle.
 The script reports both the installed path and the backup path. It does not delete the previous version.
-Reopen FL Studio and scan plugins if needed. Version 0.3.0 retains the same plugin identity so it updates existing instances.
+Reopen FL Studio and scan plugins if needed. Version 0.4.0 retains the same plugin identity so it updates existing instances.
 
 ```powershell
 # From an elevated PowerShell window:

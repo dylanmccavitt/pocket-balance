@@ -10,15 +10,15 @@ The companion therefore cannot infer those assignments safely. The saved mapping
 
 1. Locate FL Studio's **User data folder** in **Options > File settings**.
 2. Open that folder in Finder or File Explorer.
-3. Open `Settings/Hardware` inside the folder.
-4. Copy the complete `FLStudio/PocketBalanceSourceSync` folder from this release into `Settings/Hardware`.
+3. Open `FL Studio/Settings/Hardware` inside the folder.
+4. Copy the complete `FLStudio/PocketBalanceSourceSync` folder from this release into `FL Studio/Settings/Hardware`.
 5. Confirm the installed folder contains `device_PocketBalanceSourceSync.py`.
 6. Restart FL Studio if the new controller type does not appear.
 
 The resulting path ends with:
 
 ```text
-Settings/Hardware/PocketBalanceSourceSync/device_PocketBalanceSourceSync.py
+FL Studio/Settings/Hardware/PocketBalanceSourceSync/device_PocketBalanceSourceSync.py
 ```
 
 FL Studio runs MIDI scripts through an enabled MIDI input. Use one dedicated input for this companion.
@@ -35,7 +35,7 @@ The companion requires a current FL Studio version with MIDI scripting API 29 or
 6. Open FL Studio's **Options > MIDI settings**.
 7. Select the new IAC port under **Input**.
 8. Enable the input.
-9. Set **Controller type** to **Pocket Balance Source Sync**.
+9. Set **Controller type** to **Pocket Balance Source Sync (user)**.
 
 No notes need to enter the port. FL Studio calls the companion's idle callback while the input is enabled.
 Do not enable MIDI master sync for this port. The companion sends no MIDI output.
