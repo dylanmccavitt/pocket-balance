@@ -115,14 +115,27 @@ class ProtocolTests(unittest.TestCase):
         expected_crc = sync.crc16(bytes([1, 2, 0, 4, 11, 1, 113, 21, 14, 72, 97, 116]))
         self.assertEqual(words[3], (3, (expected_crc << 4) | 11))
 
-    def test_empty_name_and_character_limit(self):
+    def test_empty_name_and_utf8_byte_limit(self):
         self.assertEqual(sync.source_text("  ", 13), "Mixer 13")
         self.assertEqual(sync.source_text("x\x00y", 2), "xy")
         self.assertEqual(len(sync.source_text("🥁" * 80, 2)), 64)
+        self.assertEqual(sync.source_text("x" * 300, 2), "x" * 256)
+        self.assertEqual(sync.source_text("鼓" * 100, 2), "鼓" * 85)
+        self.assertEqual(sync.source_text("x" + "🥁" * 64, 2), "x" + "🥁" * 63)
+        self.assertEqual(sync.source_text("  Kick  ", 2), "  Kick  ")
         with self.assertRaises(ValueError):
             sync.encode_name(16, 1, "Kick", context())
         with self.assertRaises(ValueError):
             sync.encode_name(0, 255, "Kick", context())
+
+    def test_long_ascii_and_host_whitespace_round_trip(self):
+        receiver = Receiver(context())
+        link = sync.Link(20, 0, {}, receiver.context, receiver.read, receiver.write)
+        names = {0: (12, "  Kick  "), 1: (13, "A" * 256), 2: (14, "鼓" * 85)}
+        link.configure(names, 7, 0)
+        drive(link, receiver, count=400)
+        self.assertEqual(receiver.names, names)
+        self.assertEqual(link.delivered, names)
 
     def test_no_advance_until_ack_and_same_packet_retry(self):
         receiver = Receiver(context())

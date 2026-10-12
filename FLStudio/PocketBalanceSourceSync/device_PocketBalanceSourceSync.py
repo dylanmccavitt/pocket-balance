@@ -69,9 +69,12 @@ def crc16(data):
 
 
 def source_text(name, source):
-    # The processor has the same 64-character label limit. Keep Unicode intact.
-    text = str(name).replace("\x00", "").strip()[:64]
-    return text if text else "Mixer " + str(source)
+    # Sync preserves host spacing and uses the protocol's 256-byte name limit.
+    text = str(name).replace("\x00", "")
+    if not text.strip():
+        return "Mixer " + str(source)
+    # A UTF-8 suffix can be incomplete after truncation. Drop only that suffix.
+    return text.encode("utf-8", "replace")[:256].decode("utf-8", "ignore")
 
 
 def encode_name(lane, source, name, context):

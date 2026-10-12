@@ -77,8 +77,8 @@ The **Follow FL Mixer names** panel accepts Mixer tracks **0–126**. Track **0*
 ## Behavior and limits
 
 - Mixer renaming updates mapped source labels after the companion processes the change.
-- Labels retain up to 64 characters. Valid Unicode characters are preserved.
-- Blank Mixer names use `Mixer N` as a fallback label.
+- Labels retain up to 256 UTF-8 bytes without splitting a character. Leading and trailing spaces are preserved.
+- Empty or whitespace-only Mixer names use `Mixer N` as a fallback label. Embedded NUL characters are removed.
 - A source must have an active route to the plugin's owner track.
 - A missing route stops that source's updates and changes route status. Its previous label remains available.
 - Role selection and **Auto role from label** remain unchanged during synchronization.
