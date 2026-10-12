@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Run with: python3 -m unittest discover -s Tests -p '*SourceSync*.py'."""
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 import sys
 import types
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "FLStudio/PocketBalanceSourceSync/device_PocketBalanceSourceSync.py"
-for name in ("mixer", "plugins", "general", "transport"):
+for name in ("mixer", "plugins", "general", "transport", "device"):
     sys.modules[name] = types.ModuleType(name)
 spec = importlib.util.spec_from_file_location("source_sync_companion", SCRIPT)
 sync = importlib.util.module_from_spec(spec)
@@ -243,6 +245,8 @@ class FakeHost:
         self.writes = []
         self.param_reads = []
         self.safe = True
+        self.port = 10
+        self.output_assigned = True
         self.recording = False
         self.add(20, 0, {0: 12, 3: 14, 7: 18})
         sync.mixer.trackCount = lambda: self.count
@@ -257,6 +261,8 @@ class FakeHost:
         sync.plugins.setParamValue = self.set_value
         sync.general.safeToEdit = lambda: self.safe
         sync.transport.isRecording = lambda: self.recording
+        sync.device.getPortNumber = lambda: self.port
+        sync.device.isAssigned = lambda: self.output_assigned
 
     def add(self, track, slot, mapping, revision=11):
         # Model FL's inserted bypass, so discovery cannot use raw JUCE indices.
@@ -458,6 +464,44 @@ class HostTests(unittest.TestCase):
         host.safe = False
         host.drive(companion)
         self.assertEqual(host.writes, [])
+
+    def test_startup_warns_when_input_port_is_unassigned(self):
+        host = FakeHost()
+        host.port = -1
+        host.output_assigned = False
+        output = StringIO()
+        with redirect_stdout(output):
+            sync.OnInit()
+        self.assertIn("Pocket Balance Source Sync ready.", output.getvalue())
+        self.assertIn("input Port is unassigned", output.getvalue())
+        self.assertIn("matching input and output Port numbers", output.getvalue())
+        self.assertEqual(host.writes, [])
+        self.assertEqual(sync._companion.tick, 0)
+
+    def test_startup_warns_when_matching_output_is_missing(self):
+        host = FakeHost()
+        host.port = 17
+        host.output_assigned = False
+        output = StringIO()
+        with redirect_stdout(output):
+            sync.OnInit()
+        self.assertIn("no linked output", output.getvalue())
+        self.assertIn("output's Port to 17", output.getvalue())
+        self.assertIn("Options > MIDI settings", output.getvalue())
+        self.assertEqual(host.writes, [])
+
+    def test_startup_has_no_warning_for_healthy_assignment_including_port_zero(self):
+        for port in (0, 10):
+            with self.subTest(port=port):
+                host = FakeHost()
+                host.port = port
+                output = StringIO()
+                with redirect_stdout(output):
+                    sync.OnInit()
+                self.assertEqual(output.getvalue(),
+                    "Pocket Balance Source Sync ready. Set explicit input mappings in Pocket Balance.\n")
+                self.assertEqual(host.writes, [])
+                self.assertFalse(sync._companion.loading)
 
     def test_callbacks_suspend_during_load_and_consume_dedicated_midi(self):
         host = FakeHost()

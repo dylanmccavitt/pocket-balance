@@ -10,6 +10,7 @@ import mixer
 import plugins
 import general
 import transport
+import device
 
 SCALE = 16777216
 PHASE = 8388608
@@ -400,6 +401,14 @@ _companion = Companion()
 def OnInit():
     _companion.clear()
     print("Pocket Balance Source Sync ready. Set explicit input mappings in Pocket Balance.")
+    port = device.getPortNumber()
+    output_assigned = device.isAssigned()
+    if port < 0:
+        print("Pocket Balance Source Sync: input Port is unassigned. "
+              "Set matching input and output Port numbers in Options > MIDI settings.")
+    elif not output_assigned:
+        print("Pocket Balance Source Sync: no linked output. "
+              "Set the dedicated output's Port to " + str(port) + " in Options > MIDI settings.")
 
 
 def OnDeInit():
