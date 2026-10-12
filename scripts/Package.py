@@ -68,6 +68,11 @@ def main():
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copy2(juce / 'LICENSE.md', output / 'JUCE-LICENSE.md')
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
+    for name in tracked:
+        if name.startswith('docs/') and (root / name).is_file():
+            destination = output / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / name, destination)
     with zipfile.ZipFile(output / 'Pocket-Balance-corresponding-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
         for name in tracked:
             if name and (root / name).is_file():
