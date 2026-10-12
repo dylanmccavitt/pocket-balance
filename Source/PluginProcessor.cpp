@@ -65,9 +65,14 @@ PocketBalanceProcessor::PocketBalanceProcessor()
     int ci = 0;
     for (const auto* id : { "clash_enabled", "clash_source", "clash_trigger", "clash_band", "clash_depth" })
         clashParameters[size_t(ci++)] = parameters.getRawParameterValue(id);
-    // Preserve all 73 existing parameter indices. These two are not serialized.
+    // Preserve all 73 existing parameter indices. Transport/readback values are not serialized.
     addParameter(sourceSyncPacket = new SourceSyncParameter(false));
     addParameter(sourceSyncAck = new SourceSyncParameter(true));
+    addParameter(sourceSyncContext = new SourceSyncParameter("source_sync_context", true));
+    for (int i = 0; i < pocket::laneCount; ++i)
+        addParameter(sourceSyncMapParameters[size_t(i)] = new SourceSyncParameter("source_sync_map" + juce::String(i + 1), true));
+    sourceTracks.fill(-1);
+    refreshSourceContext();
     startTimerHz(30);
 }
 
@@ -75,8 +80,153 @@ PocketBalanceProcessor::~PocketBalanceProcessor() { stopTimer(); }
 
 void PocketBalanceProcessor::timerCallback()
 {
+    const juce::ScopedLock lock(sourceSyncLock);
+    sourceSyncAck->flushHostValue(); sourceSyncContext->flushHostValue();
+    for (auto* parameter : sourceSyncMapParameters) parameter->flushHostValue();
     std::uint32_t word = 0;
-    if (sourceSyncPacket->takePacket(word)) sourceSyncAck->publishAcknowledgement(word);
+    if (!sourceSyncPacket->takePacket(word)) return;
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+    if (sourceCompanionHeard && now - sourceLastContact > 10000.0)
+    {
+        sourceReceiver.clear();
+        if (sourceValidRoutes != 0) invalidateSourceCapture();
+        sourceValidRoutes = 0; // Require a fresh STATUS after an interrupted companion session.
+    }
+    pocket::SourceSyncReceiver::Context context { sourceContextWord, sourceTracks, sourceValidRoutes };
+    const auto result = sourceReceiver.accept(word, context);
+    if (result == pocket::SourceSyncReceiver::Result::rejected)
+    { sourceSyncRejected = true; return; }
+    sourceCompanionHeard = true; sourceLastContact = now; sourceSyncRejected = false;
+    if (result == pocket::SourceSyncReceiver::Result::routeStatus)
+    {
+        std::uint16_t mapped = 0;
+        for (int i = 0; i < pocket::laneCount; ++i)
+            if (sourceTracks[size_t(i)] >= 0) mapped |= static_cast<std::uint16_t>(1u << i);
+        const auto valid = static_cast<std::uint16_t>(word & mapped);
+        if (valid != sourceValidRoutes) invalidateSourceCapture();
+        sourceValidRoutes = valid;
+    }
+    else if (result == pocket::SourceSyncReceiver::Result::nameReady)
+    {
+        // Preserve exact Mixer text. Do not invoke the editor's Auto-role inference.
+        const auto lane = sourceReceiver.completedLane();
+        const auto autoKey = "autoRole" + juce::String(lane);
+        if (!parameters.state.hasProperty(autoKey))
+            parameters.state.setProperty(autoKey, laneName(lane).startsWith("Drum "), nullptr);
+        parameters.state.setProperty("name" + juce::String(lane),
+            juce::String::fromUTF8(sourceReceiver.completedName(), sourceReceiver.completedNameBytes()), nullptr);
+    }
+    sourceSyncAck->publishAcknowledgement(word);
+}
+
+std::array<int, pocket::laneCount> PocketBalanceProcessor::sourceMapping() const
+{ const juce::ScopedLock lock(sourceSyncLock); return sourceTracks; }
+int PocketBalanceProcessor::sourceOwnerTrack() const
+{ const juce::ScopedLock lock(sourceSyncLock); return sourceDestinationTrack; }
+int PocketBalanceProcessor::sourceOwnerSlot() const
+{ const juce::ScopedLock lock(sourceSyncLock); return sourceDestinationSlot; }
+std::uint32_t PocketBalanceProcessor::getSourceSyncContextWord() const
+{ const juce::ScopedLock lock(sourceSyncLock); return sourceContextWord; }
+
+void PocketBalanceProcessor::invalidateSourceCapture()
+{
+    ready.store(false); learnCommand.store(2);
+    stopClashPreview(); clashCaptureStable.store(false);
+}
+
+void PocketBalanceProcessor::refreshSourceContext()
+{
+    sourceRevision = (sourceRevision + 1u) & 255u;
+    const bool linked = sourceDestinationTrack >= 0 && sourceDestinationSlot >= 0;
+    sourceContextWord = (sourceRevision << 15) | (linked ? 1u << 14 : 0u)
+        | static_cast<unsigned>(sourceDestinationTrack + 1)
+        | (static_cast<unsigned>(sourceDestinationSlot + 1) << 10);
+    sourceReceiver.clear(); sourceSyncPacket->discardPacket();
+    sourceSyncAck->publishAcknowledgement(0);
+    sourceValidRoutes = 0; sourceCompanionHeard = false; sourceSyncRejected = false;
+    // Publish mappings before context. The companion reads context twice around the map.
+    for (int i = 0; i < pocket::laneCount; ++i)
+        sourceSyncMapParameters[size_t(i)]->publishAcknowledgement(static_cast<std::uint32_t>(sourceTracks[size_t(i)] + 1) << 14);
+    sourceSyncContext->publishAcknowledgement(sourceContextWord);
+}
+
+void PocketBalanceProcessor::setSourceMapping(int ownerTrack, int ownerSlot,
+                                             const std::array<int, pocket::laneCount>& mapping)
+{
+    const juce::ScopedLock lock(sourceSyncLock);
+    if (ownerTrack < 0 || ownerTrack > 500 || ownerSlot < 0 || ownerSlot > 9)
+    { clearSourceMapping(); return; }
+    sourceDestinationTrack = ownerTrack; sourceDestinationSlot = ownerSlot;
+    bool any = false;
+    for (int i = 0; i < pocket::laneCount; ++i)
+    {
+        const int track = mapping[size_t(i)];
+        sourceTracks[size_t(i)] = track >= 0 && track <= 500 ? track : -1;
+        any |= sourceTracks[size_t(i)] >= 0;
+    }
+    if (!any) { clearSourceMapping(); return; }
+    auto previous = parameters.state.getChildWithName("SourceSync");
+    if (previous.isValid()) parameters.state.removeChild(previous, nullptr);
+    juce::ValueTree mappingState("SourceSync");
+    mappingState.setProperty("schema", 1, nullptr);
+    mappingState.setProperty("ownerTrack", ownerTrack, nullptr);
+    mappingState.setProperty("ownerSlot", ownerSlot, nullptr);
+    for (int i = 0; i < pocket::laneCount; ++i)
+        mappingState.setProperty("lane" + juce::String(i), sourceTracks[size_t(i)], nullptr);
+    parameters.state.appendChild(mappingState, nullptr);
+    refreshSourceContext(); invalidateSourceCapture();
+}
+
+void PocketBalanceProcessor::clearSourceMapping()
+{
+    const juce::ScopedLock lock(sourceSyncLock);
+    auto mappingState = parameters.state.getChildWithName("SourceSync");
+    if (mappingState.isValid()) parameters.state.removeChild(mappingState, nullptr);
+    sourceTracks.fill(-1); sourceDestinationTrack = -1; sourceDestinationSlot = -1;
+    refreshSourceContext(); invalidateSourceCapture();
+}
+
+void PocketBalanceProcessor::restoreSourceMapping()
+{
+    sourceTracks.fill(-1); sourceDestinationTrack = -1; sourceDestinationSlot = -1;
+    const auto mappingState = parameters.state.getChildWithName("SourceSync");
+    if (mappingState.isValid())
+    {
+        const auto integer = [&mappingState](const juce::Identifier& key, int low, int high, int& result)
+        {
+            const auto text = mappingState.getProperty(key).toString();
+            const auto value = text.getIntValue();
+            if (text != juce::String(value) || value < low || value > high) return false;
+            result = value; return true;
+        };
+        int schema = 0, owner = -1, slot = -1;
+        auto mapping = sourceTracks;
+        bool valid = integer("schema", 1, 1, schema) && integer("ownerTrack", 0, 500, owner)
+            && integer("ownerSlot", 0, 9, slot);
+        bool any = false;
+        for (int i = 0; i < pocket::laneCount; ++i)
+        {
+            valid &= integer("lane" + juce::String(i), -1, 500, mapping[size_t(i)]);
+            any |= mapping[size_t(i)] >= 0;
+        }
+        if (valid && any) { sourceTracks = mapping; sourceDestinationTrack = owner; sourceDestinationSlot = slot; }
+        else parameters.state.removeChild(mappingState, nullptr);
+    }
+    refreshSourceContext();
+}
+
+juce::String PocketBalanceProcessor::sourceSyncStatus() const
+{
+    const juce::ScopedLock lock(sourceSyncLock);
+    if (sourceDestinationTrack < 0) return "FL source names: not linked";
+    if (!sourceCompanionHeard) return "FL source names: waiting for companion";
+    if (juce::Time::getMillisecondCounterHiRes() - sourceLastContact > 10000.0) return "FL source names: companion offline";
+    if (sourceSyncRejected) return "FL source names: retrying transfer";
+    int mapped = 0, active = 0;
+    for (int i = 0; i < pocket::laneCount; ++i)
+        if (sourceTracks[size_t(i)] >= 0) { ++mapped; if ((sourceValidRoutes & (1u << i)) != 0) ++active; }
+    if (active < mapped) return "FL source names: " + juce::String(active) + "/" + juce::String(mapped) + " routes connected";
+    return "FL source names linked: " + juce::String(mapped) + " inputs";
 }
 
 bool PocketBalanceProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -314,12 +464,13 @@ juce::String PocketBalanceProcessor::laneName(int i) const
 void PocketBalanceProcessor::setLaneName(int i, const juce::String& name)
 { parameters.state.setProperty("name" + juce::String(i), name.trim().substring(0, 64), nullptr); }
 void PocketBalanceProcessor::getStateInformation(juce::MemoryBlock& data)
-{ if (auto xml = parameters.copyState().createXml()) copyXmlToBinary(*xml, data); }
+{ const juce::ScopedLock lock(sourceSyncLock); if (auto xml = parameters.copyState().createXml()) copyXmlToBinary(*xml, data); }
 void PocketBalanceProcessor::setStateInformation(const void* data, int size)
 {
     if (auto xml = getXmlFromBinary(data, size))
         if (xml->hasTagName(parameters.state.getType()))
         {
+            const juce::ScopedLock lock(sourceSyncLock);
             auto state = juce::ValueTree::fromXml(*xml);
             // Older sessions must clear a correction already enabled in this instance.
             const std::array<const char*, 5> ids { "clash_enabled", "clash_source", "clash_trigger", "clash_band", "clash_depth" };
@@ -333,6 +484,7 @@ void PocketBalanceProcessor::setStateInformation(const void* data, int size)
                 }
             clashWriters.fetch_add(1);
             parameters.replaceState(state);
+            restoreSourceMapping();
             clashGeneration.fetch_add(1); clashWriters.fetch_sub(1);
             ready.store(false); learnCommand.store(2); compare.store(false); canUndo.store(false);
             stopClashPreview(); clashUndoReady.store(false); clashCaptureStable.store(false);

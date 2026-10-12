@@ -6,6 +6,7 @@
 #include <iostream>
 #include <limits>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -459,7 +460,7 @@ void captureClashLoop(PocketBalanceProcessor& p, double rate = 48000)
 void testClashWorkflow()
 {
     PocketBalanceProcessor p;
-    require(p.getParameters().size() == 75, "Source transport appends to the 73 existing parameters");
+    require(p.getParameters().size() == 92, "Source transport and mapping readback append to the 73 existing parameters");
     auto* originalLast = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[67]);
     require(originalLast && originalLast->paramID == "guard", "Existing parameter order remains unchanged");
     p.setParameterValue("guard", 0); p.setParameterValue("output", 0); p.prepareToPlay(48000, 511);
@@ -554,10 +555,10 @@ void testSourceSyncProbe()
     auto* ack = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[74]);
     require(packet && packet->paramID == "source_sync_packet" && ack && ack->paramID == "source_sync_ack",
             "Transport parameters append with stable IDs");
-    require(!packet->isAutomatable() && !ack->isAutomatable()
-        && ack->getCategory() == juce::AudioProcessorParameter::otherMeter,
-        "Transport is not automatable and acknowledgement is a meter");
-    const float value = float(0xabcdef) / 16777216.0f;
+    require(packet->isAutomatable() && ack->isAutomatable()
+        && ack->getCategory() == juce::AudioProcessorParameter::genericParameter,
+        "FL requires generic automatable flags to expose transport parameters to scripting");
+    const float value = float(0xc00001) / 16777216.0f; // RESET always works while unlinked.
     packet->setValue(value);
     near(ack->getValue(), 0, 0, "Packet setter does not run message-thread work");
     for (int i = 0; i < 200 && ack->getValue() == 0.0f; ++i)
@@ -573,6 +574,137 @@ void testSourceSyncProbe()
     near(restored.getParameters()[73]->getValue(), 0, 0, "Packets are not saved in project state");
     near(restored.getParameters()[74]->getValue(), 0, 0, "Acknowledgements are not saved in project state");
 }
+
+struct SourceSyncHostSender
+{
+    PocketBalanceProcessor& processor;
+    std::uint32_t phase = 0;
+    explicit SourceSyncHostSender(PocketBalanceProcessor& p) : processor(p)
+    { phase = static_cast<std::uint32_t>(p.getParameters()[74]->getValue() * 16777216.0f) & (1u << 23); }
+    bool send(pocket::SourceSyncReceiver::Opcode opcode, std::uint32_t payload, bool expectAck = true)
+    {
+        phase ^= 1u << 23;
+        const auto word = phase | (static_cast<std::uint32_t>(opcode) << 20) | payload;
+        const auto normalized = float(word) / 16777216.0f;
+        processor.getParameters()[73]->setValue(normalized);
+        for (int i = 0; i < (expectAck ? 200 : 40); ++i)
+        {
+            juce::Timer::callPendingTimersSynchronously();
+            if (std::abs(processor.getParameters()[74]->getValue() - normalized) < 1.0e-9f) return true;
+            juce::Thread::sleep(5);
+        }
+        return false;
+    }
+    void resetAndStatus(std::uint16_t routes)
+    {
+        require(send(pocket::SourceSyncReceiver::reset, 0), "RESET reaches the message thread");
+        require(send(pocket::SourceSyncReceiver::status, routes), "Route status reaches the message thread");
+    }
+    bool name(int lane, int source, const juce::String& text, unsigned damage = 0)
+    {
+        const auto context = processor.getSourceSyncContextWord();
+        const auto nonce = (context >> 15) & 127u;
+        std::vector<std::uint8_t> content { static_cast<std::uint8_t>(static_cast<unsigned>(source) >> 8),
+                                          static_cast<std::uint8_t>(source) };
+        const auto* utf8 = reinterpret_cast<const std::uint8_t*>(text.toRawUTF8());
+        content.insert(content.end(), utf8, utf8 + text.getNumBytesAsUTF8());
+        if (!send(pocket::SourceSyncReceiver::begin, (static_cast<unsigned>(lane) << 16)
+              | (static_cast<unsigned>(content.size()) << 7) | nonce)) return false;
+        for (std::size_t i = 0; i < content.size(); i += 2)
+        {
+            const auto next = i + 1 < content.size() ? content[i + 1] : 0;
+            if (!send(pocket::SourceSyncReceiver::data, (static_cast<std::uint32_t>((i / 2) & 15u) << 16)
+                    | (static_cast<std::uint32_t>(content[i]) << 8) | static_cast<std::uint32_t>(next))) return false;
+        }
+        const auto crc = pocket::SourceSyncReceiver::frameCrc(lane, content.size(), static_cast<int>(nonce), context, content.data());
+        return send(pocket::SourceSyncReceiver::end, ((static_cast<std::uint32_t>(crc) ^ damage) << 4) | (nonce & 15u), damage == 0);
+    }
+};
+
+void testSourceSyncWorkflow()
+{
+    PocketBalanceProcessor p;
+    std::array<int, pocket::laneCount> mapping; mapping.fill(-1); mapping[0] = 12; mapping[7] = 500;
+    p.setParameterValue(p.laneId(0, "role"), 7);
+    p.setParameterValue(p.laneId(7, "role"), 2);
+    p.setParameterValue(p.laneId(0, "gain"), -3.5f);
+    p.parameters.state.setProperty("autoRole7", false, nullptr);
+    p.setParameterValue("clash_enabled", 1);
+    p.setParameterValue("clash_depth", 1.5f);
+    std::array<float, 73> audio;
+    for (int i = 0; i < 73; ++i) audio[size_t(i)] = p.getParameters()[i]->getValue();
+    p.setSourceMapping(400, 9, mapping);
+    const auto context = p.getSourceSyncContextWord();
+    require((context & 1023u) == 401 && ((context >> 10) & 15u) == 10 && (context & (1u << 14)) != 0,
+            "Context exposes the explicit destination, including high Mixer indices");
+    near(p.getParameters()[75]->getValue(), float(context) / 16777216.0f, 0, "Host reads exact runtime context");
+    p.getParameters()[75]->setValue(0.5f);
+    near(p.getParameters()[75]->getValue(), float(context) / 16777216.0f, 0, "Host writes cannot replace context metadata");
+    for (int i = 0; i < pocket::laneCount; ++i)
+    {
+        auto* parameter = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[76 + i]);
+        require(parameter && parameter->paramID == "source_sync_map" + juce::String(i + 1)
+            && parameter->isAutomatable() && parameter->getCategory() == juce::AudioProcessorParameter::genericParameter,
+            "Mapping parameters remain visible to FL scripting with stable IDs");
+        near(parameter->getValue(), float(mapping[size_t(i)] + 1) / 1024.0f, 0, "Readback preserves unmapped gaps and high track numbers");
+        parameter->setValue(0.5f);
+        near(parameter->getValue(), float(mapping[size_t(i)] + 1) / 1024.0f, 0, "Host writes cannot replace mapping metadata");
+    }
+    struct MetadataListener : juce::AudioProcessorParameter::Listener
+    {
+        float last = -1;
+        void parameterValueChanged(int, float value) override { last = value; }
+        void parameterGestureChanged(int, bool) override {}
+    } listener;
+    auto* metadata = p.getParameters()[76];
+    metadata->addListener(&listener);
+    metadata->setValueNotifyingHost(0.5f);
+    near(listener.last, 0.5f, 0, "Host initially receives its attempted metadata write");
+    for (int i = 0; i < 200 && std::abs(listener.last - metadata->getValue()) > 1.0e-9f; ++i)
+    { juce::Timer::callPendingTimersSynchronously(); juce::Thread::sleep(5); }
+    near(listener.last, metadata->getValue(), 0, "Idle timer repairs the host metadata cache without a command");
+    metadata->removeListener(&listener);
+    SourceSyncHostSender sender(p);
+    sender.resetAndStatus((1u << 0) | (1u << 7));
+    const auto unicodeName = juce::String::fromUTF8("  Kick \xc3\xa9  ");
+    require(sender.name(0, 12, unicodeName), "Closed-editor timer accepts an exact UTF-8 name");
+    require(p.laneName(0) == unicodeName && bool(p.parameters.state.getProperty("autoRole0")),
+            "External rename preserves whitespace and the implicit Auto preference");
+    require(p.laneName(1) == "Drum 02", "Unmapped lanes keep their labels");
+    std::unique_ptr<juce::AudioProcessorEditor> editor(p.createEditor());
+    auto* view = dynamic_cast<PocketBalanceEditor*>(editor.get());
+    require(sender.name(7, 500, "808 Snare"), "Open-editor sync accepts high Mixer index");
+    view->refreshDisplay();
+    auto* automatic = dynamic_cast<juce::TextButton*>(findNamedComponent(*editor, "auto_role_0"));
+    auto* manual = dynamic_cast<juce::TextButton*>(findNamedComponent(*editor, "auto_role_7"));
+    require(automatic && automatic->getToggleState() && manual && !manual->getToggleState(),
+            "Open editor preserves implicit Auto=true and explicit Auto=false");
+    for (int i = 0; i < 73; ++i)
+        near(p.getParameters()[i]->getValue(), audio[size_t(i)], 0, "Source sync cannot change any existing audio parameter");
+    require(!sender.name(0, 12, "Corrupt", 1) && p.laneName(0) == unicodeName,
+            "Corrupt content receives no ACK and leaves the current label intact");
+    sender.resetAndStatus((1u << 0) | (1u << 7));
+    require(sender.name(0, 12, "Kick Updated"), "RESET recovers after a malformed transaction");
+    juce::MemoryBlock saved; p.getStateInformation(saved);
+    PocketBalanceProcessor other;
+    require(other.laneName(0) == "Drum 01" && other.sourceOwnerTrack() == -1, "Other instances stay independent");
+    other.setStateInformation(saved.getData(), int(saved.getSize()));
+    require(other.sourceMapping() == mapping && other.sourceOwnerTrack() == 400 && other.sourceOwnerSlot() == 9
+        && other.laneName(0) == "Kick Updated", "Project recall preserves names and explicit mappings");
+    require(other.sourceSyncStatus().contains("waiting"), "Recall waits for fresh companion route validation");
+    const auto beforeRecall = p.getSourceSyncContextWord();
+    p.setStateInformation(saved.getData(), int(saved.getSize()));
+    require(p.getSourceSyncContextWord() != beforeRecall, "State recall rotates runtime context");
+    p.clearSourceMapping();
+    require(p.sourceOwnerTrack() == -1 && (p.getSourceSyncContextWord() & (1u << 14)) == 0,
+            "Unlink clears the source binding");
+    require(p.laneName(0) == "Kick Updated" && p.appliedClash().enabled, "Unlink preserves labels and applied correction");
+    auto malformed = other.parameters.copyState();
+    malformed.getChildWithName("SourceSync").setProperty("lane0", "12junk", nullptr);
+    juce::MemoryBlock bad; juce::AudioProcessor::copyXmlToBinary(*malformed.createXml(), bad);
+    other.setStateInformation(bad.getData(), int(bad.getSize()));
+    require(other.sourceOwnerTrack() == -1, "Malformed recalled mappings fail closed");
+}
 }
 
 int main(int argc, char** argv)
@@ -587,6 +719,7 @@ int main(int argc, char** argv)
     testMixedRoutingAndRates();
     testClashWorkflow();
     testSourceSyncProbe();
+    testSourceSyncWorkflow();
     PocketBalanceProcessor p;
     require(p.getBusCount(true) == 16 && p.getTotalNumInputChannels() == 32, "Expose 16 stereo input buses");
     require(p.getTotalNumOutputChannels() == 2, "Expose one stereo output");

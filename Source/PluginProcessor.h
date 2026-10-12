@@ -6,6 +6,7 @@
 #include "WaveformHistory.h"
 #include "ClashEngine.h"
 #include "SourceSyncParameter.h"
+#include "SourceSyncProtocol.h"
 #include <atomic>
 
 class PocketBalanceProcessor : public juce::AudioProcessor, private juce::Timer
@@ -49,6 +50,13 @@ public:
     float value(const juce::String& id) const { return parameters.getRawParameterValue(id)->load(); }
     juce::String laneName(int) const;
     void setLaneName(int, const juce::String&);
+    std::array<int, pocket::laneCount> sourceMapping() const;
+    int sourceOwnerTrack() const;
+    int sourceOwnerSlot() const;
+    void setSourceMapping(int ownerTrack, int ownerSlot, const std::array<int, pocket::laneCount>&);
+    void clearSourceMapping();
+    juce::String sourceSyncStatus() const;
+    std::uint32_t getSourceSyncContextWord() const;
     std::array<std::atomic<float>, pocket::laneCount> meters {};
     std::array<std::atomic<bool>, pocket::laneCount> connected {};
     std::atomic<float> outputPeak { 0 }, reduction { 0 }, duckReduction { 0 };
@@ -72,6 +80,20 @@ private:
     void timerCallback() override;
     SourceSyncParameter* sourceSyncPacket = nullptr;
     SourceSyncParameter* sourceSyncAck = nullptr;
+    SourceSyncParameter* sourceSyncContext = nullptr;
+    std::array<SourceSyncParameter*, pocket::laneCount> sourceSyncMapParameters {};
+    mutable juce::CriticalSection sourceSyncLock;
+    std::array<int, pocket::laneCount> sourceTracks {};
+    int sourceDestinationTrack = -1, sourceDestinationSlot = -1;
+    unsigned sourceRevision = 0;
+    std::uint32_t sourceContextWord = 0;
+    std::uint16_t sourceValidRoutes = 0;
+    double sourceLastContact = 0;
+    bool sourceCompanionHeard = false, sourceSyncRejected = false;
+    pocket::SourceSyncReceiver sourceReceiver;
+    void refreshSourceContext(); // Caller holds sourceSyncLock.
+    void restoreSourceMapping(); // Caller holds sourceSyncLock.
+    void invalidateSourceCapture();
     static BusesProperties makeBuses();
     static std::uint32_t packClash(const pocket::ClashConfig&);
     static pocket::ClashConfig unpackClash(std::uint32_t);

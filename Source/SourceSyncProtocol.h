@@ -11,7 +11,7 @@ namespace pocket
 // BEGIN: lane:4 | content byte count:9 | revision nonce:7.
 // DATA: chunk index modulo 16:4 | first byte:8 | second byte:8.
 // END: CRC16-CCITT-FALSE:16 | nonce low bits:4.
-// Content is source Mixer track:8 followed by 1..256 UTF-8 name bytes.
+// Content is source Mixer track:16 (big endian), then 1..256 UTF-8 name bytes.
 // CRC covers [1, lane, count high, count low, nonce, context high, middle, low]
 // followed by all content bytes, without the final DATA padding byte.
 class SourceSyncReceiver
@@ -27,7 +27,7 @@ public:
     };
 
     static constexpr std::size_t maxNameBytes = 256;
-    static constexpr std::size_t maxContentBytes = maxNameBytes + 1;
+    static constexpr std::size_t maxContentBytes = maxNameBytes + 2;
     static constexpr std::uint32_t phaseMask = 1u << 23;
 
     static std::uint16_t crcByte(std::uint16_t crc, std::uint8_t byte) noexcept
@@ -96,8 +96,8 @@ public:
     }
 
     int completedLane() const noexcept { return lane; }
-    const char* completedName() const noexcept { return reinterpret_cast<const char*>(content.data() + 1); }
-    int completedNameBytes() const noexcept { return static_cast<int>(length - 1); }
+    const char* completedName() const noexcept { return reinterpret_cast<const char*>(content.data() + 2); }
+    int completedNameBytes() const noexcept { return static_cast<int>(length - 2); }
 
 private:
     Result acceptNew(std::uint32_t word, const Context& context) noexcept
@@ -111,15 +111,15 @@ private:
             cancelFrame();
             return (payload & 0xf0000u) == 0 ? Result::routeStatus : Result::rejected;
         }
-        if ((context.word & (1u << 12)) == 0) { cancelFrame(); return Result::rejected; }
+        if ((context.word & (1u << 14)) == 0) { cancelFrame(); return Result::rejected; }
         if (opcode == begin)
         {
             cancelFrame();
             lane = static_cast<int>((payload >> 16) & 15u);
             length = static_cast<std::size_t>((payload >> 7) & 511u);
             nonce = static_cast<int>(payload & 127u);
-            if (length < 2 || length > maxContentBytes
-                || nonce != static_cast<int>((context.word >> 13) & 127u)
+            if (length < 3 || length > maxContentBytes
+                || nonce != static_cast<int>((context.word >> 15) & 127u)
                 || context.mapping[static_cast<std::size_t>(lane)] < 0
                 || (context.validRoutes & (1u << lane)) == 0) return Result::rejected;
             active = true; frameContext = context.word;
@@ -144,7 +144,8 @@ private:
             active = false;
             if (received != length || (payload & 15u) != (static_cast<unsigned>(nonce) & 15u)
                 || (payload >> 4) != frameCrc(lane, length, nonce, frameContext, content.data())
-                || content[0] != source || !validUtf8(content.data() + 1, length - 1)) return Result::rejected;
+                || ((static_cast<unsigned>(content[0]) << 8) | content[1]) != static_cast<unsigned>(source)
+                || !validUtf8(content.data() + 2, length - 2)) return Result::rejected;
             return Result::nameReady;
         }
         cancelFrame(); return Result::rejected;

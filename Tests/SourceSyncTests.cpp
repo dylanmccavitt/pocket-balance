@@ -21,7 +21,7 @@ struct Sender
     std::uint32_t phase = 0, lastWord = 0;
     Sender()
     {
-        context.word = 21u | (1u << 8) | (1u << 12) | (11u << 13);
+        context.word = 21u | (1u << 10) | (1u << 14) | (11u << 15);
         context.mapping.fill(-1); context.mapping[2] = 14; context.mapping[7] = 22;
         context.validRoutes = (1u << 2) | (1u << 7);
     }
@@ -31,10 +31,10 @@ struct Sender
         lastWord = phase | (opcode << 20) | payload;
         return receiver.accept(lastWord, context);
     }
-    int nonce() const { return static_cast<int>((context.word >> 13) & 127u); }
+    int nonce() const { return static_cast<int>((context.word >> 15) & 127u); }
     std::vector<std::uint8_t> bytes(int source, const std::string& name)
     {
-        std::vector<std::uint8_t> content { static_cast<std::uint8_t>(source) };
+        std::vector<std::uint8_t> content { static_cast<std::uint8_t>(static_cast<unsigned>(source) >> 8), static_cast<std::uint8_t>(source) };
         content.insert(content.end(), name.begin(), name.end()); return content;
     }
     Result begin(int lane, std::size_t size)
@@ -71,9 +71,9 @@ void testWireFormat()
     for (auto byte : std::string("123456789")) check = Receiver::crcByte(check, static_cast<std::uint8_t>(byte));
     require(check == 0x29b1, "CRC matches the CCITT-FALSE reference vector");
     Sender sender;
-    require(sender.context.word == 0x017115, "Context matches the Python companion fixture");
+    require(sender.context.word == 0x05c415, "Context matches the Python companion fixture");
     const auto fixture = sender.bytes(14, "Hat");
-    require(Receiver::frameCrc(2, fixture.size(), 11, sender.context.word, fixture.data()) == 0xe271,
+    require(Receiver::frameCrc(2, fixture.size(), 11, sender.context.word, fixture.data()) == 0x1bf8,
             "CRC matches the Python companion fixture");
     require(sender.send(Receiver::status, sender.context.validRoutes) == Result::routeStatus, "STATUS carries route validity");
     require(sender.frame(2, 14, "Hat") == Result::nameReady, "Short ASCII name is accepted");
@@ -83,7 +83,10 @@ void testWireFormat()
             "Unicode and edge whitespace are preserved");
     require(sender.name() == "  \xc3\xa9 \xe9\x9f\xb3 \xf0\x9f\xa5\x81  ", "Names remain byte-exact");
     require(sender.frame(2, 14, std::string(256, 'x')) == Result::nameReady && sender.name().size() == 256,
-            "Longest content frame survives chunk-index wrap and odd padding");
+            "Longest content frame survives chunk-index wrap");
+    sender.context.mapping[2] = 500;
+    require(sender.frame(2, 500, "High track") == Result::nameReady, "Two-byte prefix supports Mixer track 500");
+    sender.context.mapping[2] = 14;
     require(sender.frame(2, 14, std::string(257, 'x')) == Result::rejected, "Oversized names are rejected");
     require(sender.frame(2, 14, "") == Result::rejected, "Empty names are rejected");
 }
@@ -107,7 +110,7 @@ void testIsolationAndCorruption()
             "Out-of-order chunks cancel a frame");
     require(sender.end(2, content) == Result::rejected, "Cancelled frame cannot finish");
     require(sender.begin(2, content.size()) == Result::accepted, "Begin starts context test");
-    sender.context.word += 1u << 13;
+    sender.context.word += 1u << 15;
     require(sender.send(Receiver::data, (14u << 8) | 'H') == Result::rejected, "Context change cancels in-flight data");
     require(sender.frame(2, 14, "Hat") == Result::nameReady, "Fresh frame works with new context");
     require(sender.begin(2, content.size()) == Result::accepted, "Begin starts map change test");
@@ -147,25 +150,27 @@ void testRetriesAndPadding()
     require(sender.begin(2, content.size()) == Result::accepted, "Retry test begins");
     require(sender.receiver.accept(sender.lastWord, sender.context) == Result::ignored,
             "Duplicate BEGIN does not restart a transaction");
-    require(sender.send(Receiver::data, (14u << 8) | 'H') == Result::accepted, "First chunk arrives");
+    require(sender.send(Receiver::data, 14u) == Result::accepted, "First chunk arrives");
     require(sender.receiver.accept(sender.lastWord, sender.context) == Result::ignored,
             "Duplicate DATA does not append bytes twice");
-    require(sender.send(Receiver::data, (1u << 16) | (static_cast<unsigned>('a') << 8) | 't') == Result::accepted,
+    require(sender.send(Receiver::data, (1u << 16) | (static_cast<unsigned>('H') << 8) | 'a') == Result::accepted,
             "Second chunk follows duplicate DATA");
+    require(sender.send(Receiver::data, (2u << 16) | (static_cast<unsigned>('t') << 8)) == Result::accepted,
+            "Final chunk carries zero padding");
     require(sender.end(2, content) == Result::nameReady && sender.name() == "Hat",
             "Retries preserve complete name bytes");
-    const auto samePhaseWord = sender.phase | (Receiver::begin << 20) | (2u << 16) | (4u << 7) | 11u;
+    const auto samePhaseWord = sender.phase | (Receiver::begin << 20) | (2u << 16) | (5u << 7) | 11u;
     require(sender.receiver.accept(samePhaseWord, sender.context) == Result::rejected,
             "A new word must flip phase");
     require(sender.send(Receiver::reset, 0) == Result::accepted, "RESET restores stream after phase error");
     require(sender.frame(2, 14, "Hat") == Result::nameReady, "Fresh transfer succeeds after phase reset");
     require(sender.begin(2, 3) == Result::accepted, "Odd content begins");
-    require(sender.send(Receiver::data, (14u << 8) | 'H') == Result::accepted, "Odd content first chunk");
+    require(sender.send(Receiver::data, 14u) == Result::accepted, "Odd content first chunk");
     require(sender.send(Receiver::data, (1u << 16) | (static_cast<unsigned>('i') << 8) | 1u) == Result::rejected,
             "Last odd content byte requires zero padding");
-    sender.context.word += 1u << 13;
+    sender.context.word += 1u << 15;
     sender.receiver.clear();
-    require(sender.send(Receiver::begin, (2u << 16) | (4u << 7) | 11u) == Result::rejected,
+    require(sender.send(Receiver::begin, (2u << 16) | (5u << 7) | 11u) == Result::rejected,
             "Old nonce cannot start a frame after revision change");
     require(sender.frame(2, 14, "New") == Result::nameReady, "New revision permits fresh names");
 }
