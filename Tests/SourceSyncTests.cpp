@@ -139,9 +139,39 @@ void testInvalidUtf8()
         require(sender.frame(2, 14, name) == Result::rejected, "Malformed UTF-8 and embedded NUL are rejected");
     }
 }
+
+void testRetriesAndPadding()
+{
+    Sender sender;
+    const auto content = sender.bytes(14, "Hat");
+    require(sender.begin(2, content.size()) == Result::accepted, "Retry test begins");
+    require(sender.receiver.accept(sender.lastWord, sender.context) == Result::ignored,
+            "Duplicate BEGIN does not restart a transaction");
+    require(sender.send(Receiver::data, (14u << 8) | 'H') == Result::accepted, "First chunk arrives");
+    require(sender.receiver.accept(sender.lastWord, sender.context) == Result::ignored,
+            "Duplicate DATA does not append bytes twice");
+    require(sender.send(Receiver::data, (1u << 16) | (static_cast<unsigned>('a') << 8) | 't') == Result::accepted,
+            "Second chunk follows duplicate DATA");
+    require(sender.end(2, content) == Result::nameReady && sender.name() == "Hat",
+            "Retries preserve complete name bytes");
+    const auto samePhaseWord = sender.phase | (Receiver::begin << 20) | (2u << 16) | (4u << 7) | 11u;
+    require(sender.receiver.accept(samePhaseWord, sender.context) == Result::rejected,
+            "A new word must flip phase");
+    require(sender.send(Receiver::reset, 0) == Result::accepted, "RESET restores stream after phase error");
+    require(sender.frame(2, 14, "Hat") == Result::nameReady, "Fresh transfer succeeds after phase reset");
+    require(sender.begin(2, 3) == Result::accepted, "Odd content begins");
+    require(sender.send(Receiver::data, (14u << 8) | 'H') == Result::accepted, "Odd content first chunk");
+    require(sender.send(Receiver::data, (1u << 16) | (static_cast<unsigned>('i') << 8) | 1u) == Result::rejected,
+            "Last odd content byte requires zero padding");
+    sender.context.word += 1u << 13;
+    sender.receiver.clear();
+    require(sender.send(Receiver::begin, (2u << 16) | (4u << 7) | 11u) == Result::rejected,
+            "Old nonce cannot start a frame after revision change");
+    require(sender.frame(2, 14, "New") == Result::nameReady, "New revision permits fresh names");
+}
 }
 int main()
 {
-    testWireFormat(); testIsolationAndCorruption(); testInvalidUtf8();
+    testWireFormat(); testIsolationAndCorruption(); testInvalidUtf8(); testRetriesAndPadding();
     std::cout << "PASS: source-name wire format, CRC, bounded UTF-8, mapping, context, retry and instance isolation\n";
 }
