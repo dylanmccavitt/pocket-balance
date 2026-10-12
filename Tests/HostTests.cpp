@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Pocket Balance contributors
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -431,6 +433,119 @@ void testMixedRoutingAndRates()
         near(p.progress(), 1, 0.00001f, "Completed capture progress reaches one");
     }
 }
+
+void fillClashLoop(juce::AudioBuffer<float>& buffer, int cursor, double rate)
+{
+    buffer.clear();
+    for (int n = 0; n < buffer.getNumSamples(); ++n)
+    {
+        const double t = double(cursor + n) / rate;
+        const float burst = std::fmod(t, 0.5) < 0.3 ? 1.0f : 0.0f;
+        const float tone = burst * float(std::sin(t * 6.283185307179586 * 110.0));
+        buffer.setSample(0, n, tone * 0.4f); buffer.setSample(1, n, -tone * 0.4f);
+        buffer.setSample(2, n, tone * 0.12f); buffer.setSample(3, n, -tone * 0.12f);
+    }
+}
+void captureClashLoop(PocketBalanceProcessor& p, double rate = 48000)
+{
+    p.startLearning(); juce::MidiBuffer midi; juce::AudioBuffer<float> buffer;
+    int cursor = 0;
+    while (cursor < int(rate * 8))
+    {
+        const int count = std::min(int(rate * 8) - cursor, cursor % 2 ? 511 : 127);
+        buffer.setSize(32, count); fillClashLoop(buffer, cursor, rate); p.processBlock(buffer, midi); cursor += count;
+    }
+}
+void testClashWorkflow()
+{
+    PocketBalanceProcessor p;
+    require(p.getParameters().size() == 73, "Five clash parameters append to the original 68");
+    auto* originalLast = dynamic_cast<juce::AudioProcessorParameterWithID*>(p.getParameters()[67]);
+    require(originalLast && originalLast->paramID == "guard", "Existing parameter order remains unchanged");
+    p.setParameterValue("guard", 0); p.setParameterValue("output", 0); p.prepareToPlay(48000, 511);
+    require(!p.appliedClash().enabled && !p.previewClash(0, 2), "Clash correction starts disabled and needs analysis");
+    captureClashLoop(p);
+    require(p.hasFreshClashCapture() && p.getClashReport().count > 0, "Simultaneous same-band drums yield fresh evidence");
+    const auto finding = p.getClashReport().findings[0];
+    require(finding.reduceLane == 0 && finding.protectLane == 1, "Correction reduces louder input to protect quieter input");
+    require(p.previewClash(0, 2), "Preview starts for a measured directional finding");
+    require(p.isClashPreviewing() && !p.appliedClash().enabled, "Preview does not change saved correction parameters");
+    juce::MemoryBlock previewState; p.getStateInformation(previewState);
+    PocketBalanceProcessor previewRestore; previewRestore.setStateInformation(previewState.getData(), int(previewState.getSize()));
+    require(!previewRestore.appliedClash().enabled && !previewRestore.isClashPreviewing(), "Preview is never serialized");
+    p.stopClashPreview(); require(!p.isClashPreviewing(), "Stop preview restores saved processing");
+    require(p.previewClash(0, 2) && p.applyClash(), "Apply commits the preview");
+    require(p.appliedClash().enabled && !p.isClashPreviewing() && p.canUndoClash(), "Applied correction is persistent and undoable");
+    require(p.previewClash(0, 2) && p.applyClash(), "Applying the same correction is idempotent");
+    p.undoClash(); require(!p.appliedClash().enabled && !p.canUndoClash(), "Repeated Apply preserves the original disabled state for Undo");
+    require(p.previewClash(0, 2) && p.applyClash(), "Apply again after Undo");
+    p.setLaneName(0, "Low tom");
+    juce::MemoryBlock appliedState; p.getStateInformation(appliedState);
+    PocketBalanceProcessor restored; restored.setStateInformation(appliedState.getData(), int(appliedState.getSize()));
+    require(restored.appliedClash().enabled && restored.appliedClash().source == 0
+        && restored.appliedClash().trigger == 1 && restored.appliedClash().band == finding.band,
+        "Applied correction pair and band survive state recall");
+    near(restored.appliedClash().depthDb, 2, 0.001f, "Applied depth survives recall");
+    require(restored.laneName(0) == "Low tom" && !restored.hasCapture() && !restored.canUndoClash(),
+        "Recall keeps names but clears stale capture and undo history");
+    p.disableClash(); require(!p.appliedClash().enabled && p.canUndoClash(), "Disable correction can be undone");
+    p.undoClash(); require(p.appliedClash().enabled, "Undo Disable restores applied correction");
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> editor(p.createEditor());
+        auto* view = dynamic_cast<PocketBalanceEditor*>(editor.get());
+        auto* mode = dynamic_cast<juce::ComboBox*>(findNamedComponent(*editor, "analysis_view"));
+        auto* previewButton = dynamic_cast<juce::TextButton*>(findNamedComponent(*editor, "clash_preview"));
+        auto* applyButton = dynamic_cast<juce::TextButton*>(findNamedComponent(*editor, "clash_apply"));
+        auto* selection = dynamic_cast<juce::ComboBox*>(findNamedComponent(*editor, "clash_finding"));
+        require(view && mode && previewButton && applyButton && selection, "New clash controls are accessible by stable component names");
+        mode->setSelectedId(2, juce::sendNotificationAsync); view->refreshDisplay();
+        require(mode->getSelectedId() == 2, "Refresh preserves a pending analysis-view choice");
+        mode->onChange(); view->refreshDisplay();
+        require(int(p.parameters.state.getProperty("analysisView")) == 2 && previewButton->isEnabled(),
+                "Frequency view and fresh measured preview are available");
+        previewButton->setToggleState(true, juce::dontSendNotification); previewButton->onClick();
+        require(p.isClashPreviewing() && applyButton->isEnabled(), "Preview UI enables Apply for the actual pending correction");
+        mode->setSelectedId(1, juce::dontSendNotification); mode->onChange();
+        require(!p.isClashPreviewing() && p.appliedClash().enabled, "Switching view cancels only the temporary preview");
+        mode->setSelectedId(2, juce::dontSendNotification); mode->onChange();
+        require(p.previewClash(0, 1), "Editor close preview test starts");
+    }
+    require(!p.isClashPreviewing() && p.appliedClash().enabled, "Editor closure ends preview but preserves applied correction");
+    p.setParameterValue(p.laneId(0, "gain"), -2);
+    require(!p.hasFreshClashCapture() && !p.previewClash(0, 2), "Changed gains require new frequency analysis");
+    p.setParameterValue(p.laneId(0, "gain"), 0);
+    p.setParameterValue(p.laneId(1, "mute"), 1);
+    require(!p.hasFreshClashCapture(), "Changed mute invalidates captured overlap");
+    p.setParameterValue(p.laneId(1, "mute"), 0);
+    p.compare.store(true);
+    require(!p.previewClash(0, 2), "Comparison prevents preview");
+    juce::MidiBuffer midi; juce::AudioBuffer<float> buffer(32, 511);
+    for (int pass = 0; pass < 32; ++pass) { fillClashLoop(buffer, pass * 511, 48000); p.processBlock(buffer, midi); }
+    fillClashLoop(buffer, 0, 48000); const float expected = buffer.getSample(0, 100) + buffer.getSample(2, 100);
+    p.processBlock(buffer, midi);
+    near(buffer.getSample(0, 100), expected, 0.0001f, "Internal comparison bypasses frequency correction without dropping inputs");
+    near(p.clashReduction.load(), 0, 0.001f, "Comparison reports no frequency reduction");
+    p.compare.store(false); fillClashLoop(buffer, 0, 48000); p.processBlockBypassed(buffer, midi);
+    near(buffer.getSample(0, 100), expected, 0.00001f, "Host bypass ignores correction and preserves auxiliary audio");
+    // Simulate a 0.2 state: no new parameter nodes exist in its XML.
+    auto oldTree = p.parameters.copyState();
+    for (int i = oldTree.getNumChildren() - 1; i >= 0; --i)
+        if (oldTree.getChild(i).getProperty("id").toString().startsWith("clash_")) oldTree.removeChild(i, nullptr);
+    juce::MemoryBlock oldState; juce::AudioProcessor::copyXmlToBinary(*oldTree.createXml(), oldState);
+    p.setStateInformation(oldState.getData(), int(oldState.getSize()));
+    require(!p.appliedClash().enabled && !p.isClashPreviewing(), "Old state clears an already active correction");
+    near(p.value("clash_trigger"), 1, 0, "Old state supplies safe default trigger");
+    near(p.value("clash_depth"), 2, 0, "Old state supplies default depth");
+    PocketBalanceProcessor fresh; fresh.setStateInformation(oldState.getData(), int(oldState.getSize()));
+    require(!fresh.appliedClash().enabled, "Old state loads unchanged in a fresh 0.3 instance");
+    captureClashLoop(p);
+    require(p.previewClash(0, 2), "New capture refreshes evidence");
+    p.startLearning(); require(!p.isClashPreviewing() && !p.hasFreshClashCapture(), "Starting capture clears preview and old evidence");
+    p.cancelLearning(); fillClashLoop(buffer, 0, 48000); p.processBlock(buffer, midi);
+    require(!p.hasCapture() && !p.isLearning(), "Cancellation clears analysis and preview");
+    captureClashLoop(p);
+    require(p.applyBalance() && !p.hasFreshClashCapture(), "Applying balance requires recapturing frequency evidence");
+}
 }
 
 int main(int argc, char** argv)
@@ -443,6 +558,7 @@ int main(int argc, char** argv)
     testSourceIdentityUiAndRecall();
     testAsyncDropdownRefresh();
     testMixedRoutingAndRates();
+    testClashWorkflow();
     PocketBalanceProcessor p;
     require(p.getBusCount(true) == 16 && p.getTotalNumInputChannels() == 32, "Expose 16 stereo input buses");
     require(p.getTotalNumOutputChannels() == 2, "Expose one stereo output");
@@ -563,6 +679,24 @@ int main(int argc, char** argv)
         juce::FileOutputStream stream { juce::File(juce::String(argv[2])) };
         require(stream.openedOk(), "Open snapshot destination");
         juce::PNGImageFormat png; require(png.writeImageToStream(screenshot, stream), "Save actual native plugin UI");
+    }
+    if (argc == 3 && snapshotMode.startsWith("--snapshot-clashes"))
+    {
+        PocketBalanceProcessor visual;
+        visual.setParameterValue("guard", 0); visual.setParameterValue("output", -6);
+        visual.setLaneName(0, "Clean 808"); visual.setLaneName(1, "Floor tom");
+        visual.setParameterValue(visual.laneId(0, "role"), 1); visual.setParameterValue(visual.laneId(1, "role"), 5);
+        visual.prepareToPlay(48000, 511); captureClashLoop(visual);
+        visual.parameters.state.setProperty("analysisView", 2, nullptr);
+        std::unique_ptr<juce::AudioProcessorEditor> editor(visual.createEditor());
+        if (snapshotMode.endsWith("small")) editor->setSize(1120, 880);
+        if (snapshotMode.endsWith("large")) editor->setSize(1600, 1100);
+        auto* view = dynamic_cast<PocketBalanceEditor*>(editor.get());
+        view->refreshDisplay(); visual.previewClash(0, 2); view->refreshDisplay();
+        auto screenshot = editor->createComponentSnapshot(editor->getLocalBounds());
+        juce::FileOutputStream stream { juce::File(juce::String(argv[2])) };
+        require(stream.openedOk(), "Open clash snapshot destination");
+        juce::PNGImageFormat png; require(png.writeImageToStream(screenshot, stream), "Save actual clash UI snapshot");
     }
     std::cout << "PASS: scope stereo ranges, timing, duck/mute/compare/bypass/output, SPSC overflow/concurrency, audio invariance; source identity inference, manual override and open-editor state recall; async waveform and role dropdown refresh ordering; 16 buses, mixed mono/disabled routing, disabled solo, variable blocks and 44.1/48/96 kHz capture, mute/solo, bypass, protection, apply, undo, state\n";
 }

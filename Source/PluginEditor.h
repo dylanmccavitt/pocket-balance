@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Pocket Balance contributors
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"

@@ -2,7 +2,7 @@
 
 A native drum mixer for FL Studio and other hosts with multiple plugin inputs.
 
-**Version 0.2.0:** 16 separate drum inputs, one stereo output, an eight-second listen-and-balance workflow, and a live waveform display.
+**Version 0.3.0:** 16 separate drum inputs, one stereo output, an eight-second listen-and-balance workflow, and a live waveform display.
 The plugin suggests levels. You keep control of the mix.
 
 ## What it does
@@ -10,6 +10,8 @@ The plugin suggests levels. You keep control of the mix.
 - Handles up to 16 mono or stereo sources per instance.
 - Suggests conservative levels for kicks, 808s, snares, claps, hats, percussion, cymbals, and other sounds.
 - Provides manual gain, mute, solo, input meters, and editable names for each source.
+- Measures repeated frequency overlap between simultaneously active drums.
+- Offers a reversible preview and one optional dynamic frequency correction, limited to 3 dB.
 - Offers adjustable kick-to-808 ducking.
 - Displays the kick against the 808/bass before and after ducking, with reduction information, or shows the output or an individual input lane.
 - Provides 1-, 2-, and 4-second display windows, display zoom, and Freeze for inspecting transients.
@@ -33,6 +35,41 @@ Processor tests cover stereo and mono inputs, disabled buses, summing, mute, sol
 They exercise 44.1, 48, and 96 kHz with varying buffer sizes.
 These tests do not establish compatibility with every DAW or replace listening tests in FL Studio.
 
+## Frequency clashes
+
+Select **Frequency clashes** in the analysis-view menu, then play a representative loop and press **Listen / 8 seconds**.
+The same capture supplies level suggestions and frequency findings. Analysis itself changes no audio.
+
+1. Select a finding and read the source pair, frequency band, overlap duration, and relative level.
+2. Check which source would be reduced and which source it would protect.
+3. Set a depth between 0 and 3 dB. The starting proposal is 2 dB.
+4. Click **Preview** to hear the reduction temporarily.
+5. Stop Preview to compare, or click **Apply correction** to retain it.
+6. Use **Undo correction** to restore the previous correction, or **Disable correction** to switch it off.
+
+Only one correction can be applied at a time. Applying another replaces it; cuts do not stack.
+Preview is temporary and is never saved. Applied settings are saved in the DAW project.
+Closing the editor, changing analysis views, starting another Listen, or using internal bypass ends Preview.
+Internal bypass disables both kick ducking and frequency correction while keeping routed inputs audible.
+
+The detector measures stereo energy in eight octave-wide frequency bands from 40 Hz to 10.24 kHz.
+It compares sources in simultaneous 20 ms frames, after lane levels and kick ducking, before frequency correction and output trim.
+A report requires substantial coactive band energy and repeated overlap, or sustained overlap of at least one second.
+It reports the strongest qualifying band for each source pair, up to eight findings.
+A directional proposal requires one source to be at least 3 dB louder in that band. Equal-level findings are informational.
+The frequency ranges are approximations from overlapping filters, not surgical boundaries.
+
+The correction reduces the louder source near the selected band center while the protected source is active there.
+It uses stereo-linked detection, a bell-shaped cut, a smoothed transition, and no lookahead.
+**Overlap is evidence of possible masking, not proof of a bad mix.** It does not judge genre, groove, or creative intent.
+Listen and compare before keeping a correction. Small level changes can also solve a clash.
+
+Changing lane gain, role, mute, solo, connections, or kick ducking makes the findings stale.
+**Apply balance first, then Listen again** before previewing a frequency correction.
+Changes in upstream samples, effects, or routing may not be detectable by the plugin; capture again after those changes.
+A new capture can evaluate the current balance but does not automatically replace an applied correction.
+Toms use the **Percussion** role in this version.
+
 ## Install on Mac
 
 1. Build or obtain the Mac package for the version you intend to use.
@@ -55,7 +92,7 @@ After building and validating this update, save the FL Studio project and close 
 The included `scripts/Deploy-Windows.ps1` refuses to run while FL Studio is open; it does not close the host or save projects automatically.
 It stages and hash-checks the new bundle, preserves the complete previous installation in a uniquely named folder under `backups/`, and then replaces the installed bundle.
 The script reports both the installed path and the backup path. It does not delete the previous version.
-Reopen FL Studio and scan plugins if needed. Version 0.2.0 retains the same plugin identity so it updates existing instances.
+Reopen FL Studio and scan plugins if needed. Version 0.3.0 retains the same plugin identity so it updates existing instances.
 
 ```powershell
 # From an elevated PowerShell window:
@@ -220,3 +257,13 @@ ctest --test-dir build-dsp --output-on-failure
 
 Source: `Source/`. Tests: `Tests/`. Build outputs: `build/PocketBalance_artefacts/Release/`.
 See `THIRD_PARTY.md` for dependency notices and distribution considerations.
+
+## License and source
+
+Copyright 2026 Pocket Balance contributors. Licensed under **AGPL-3.0-only**, without warranty.
+See [LICENSE](LICENSE) and [THIRD_PARTY.md](THIRD_PARTY.md).
+Source and version history: https://github.com/dylanmccavitt/pocket-balance
+
+After the build and tests pass, run `python scripts/Package.py --build build --output package`.
+The package contains VST3/AU bundles, license notices, and complete corresponding source, including the pinned JUCE dependency.
+Use `--juce /path/to/JUCE-8.0.15` when the build used an external JUCE checkout.

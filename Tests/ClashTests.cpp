@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Pocket Balance contributors
 #include "ClashEngine.h"
 #include <cstdlib>
 #include <iostream>

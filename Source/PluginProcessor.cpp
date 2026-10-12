@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026 Pocket Balance contributors
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
@@ -35,6 +37,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout PocketBalanceProcessor::make
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { "amount", 1 }, "Balance amount",
         juce::NormalisableRange<float>(0, 100, 1), 70.0f));
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { "guard", 1 }, "Peak guard", true));
+    // Append only: retain all existing host parameter indices and IDs.
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { "clash_enabled", 1 }, "Frequency correction enabled", false));
+    layout.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID { "clash_source", 1 }, "Frequency correction source", 0, pocket::laneCount - 1, 0));
+    layout.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID { "clash_trigger", 1 }, "Frequency correction protected source", 0, pocket::laneCount - 1, 1));
+    layout.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID { "clash_band", 1 }, "Frequency correction band", 0, pocket::clashBandCount - 1, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { "clash_depth", 1 }, "Frequency correction depth",
+        juce::NormalisableRange<float>(0, 3, 0.1f), 2.0f));
     return layout;
 }
 
@@ -53,6 +62,9 @@ PocketBalanceProcessor::PocketBalanceProcessor()
     outputParameter = parameters.getRawParameterValue("output");
     duckParameter = parameters.getRawParameterValue("duck");
     guardParameter = parameters.getRawParameterValue("guard");
+    int ci = 0;
+    for (const auto* id : { "clash_enabled", "clash_source", "clash_trigger", "clash_band", "clash_depth" })
+        clashParameters[size_t(ci++)] = parameters.getRawParameterValue(id);
 }
 
 bool PocketBalanceProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -81,6 +93,8 @@ void PocketBalanceProcessor::prepareToPlay(double rate, int)
     outputSmoother.prepare(rate); outputSmoother.reset(pocket::gainFromDb(outputParameter->load()));
     duckSmoother.prepare(rate); duckSmoother.reset(duckParameter->load());
     duck.prepare(rate); guard.prepare(rate);
+    clashAnalyser.prepare(rate); clashCorrection.prepare(rate);
+    stopClashPreview(); clashCaptureStable.store(false); clashReduction.store(0);
     scope.prepare(rate);
     meterDecay = std::exp(-1.0f / float(rate * 0.35));
     captureLength = std::int64_t(rate * 8.0);
@@ -106,6 +120,10 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
     {
         ready.store(false); learning.store(command == 1); captureSamples = 0; learnProgress.store(0);
         for (auto& analyser : analysers) analyser.reset();
+        clashAnalyser.reset();
+        learningClashSettings = currentClashSettings();
+        learningClashStable = !compare.load() && !bypass;
+        clashCaptureStable.store(false);
     }
     std::array<const float*, pocket::laneCount> left {}, right {};
     std::array<float, pocket::laneCount> target {}, peaks {};
@@ -115,6 +133,13 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
     for (int i = 0; i < pocket::laneCount; ++i)
         anySolo |= getBus(true, i)->isEnabled() && laneParameters[size_t(i)].solo->load() > 0.5f;
     const bool comparing = compare.load();
+    if (comparing || bypass || (isClashPreviewing() && !hasFreshClashCapture())) stopClashPreview();
+    const auto preview = previewConfig.load();
+    pocket::ClashConfig coherent;
+    if (readAppliedClash(coherent)) audioAppliedClash = coherent;
+    clashCorrection.configure(preview != 0 ? unpackClash(preview) : audioAppliedClash);
+    if (learning.load() && (currentClashSettings() != learningClashSettings || comparing || bypass))
+        learningClashStable = false;
     for (int i = 0; i < pocket::laneCount; ++i)
     {
         const auto index = size_t(i);
@@ -134,7 +159,7 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
     const float outputTarget = pocket::gainFromDb(outputParameter->load());
     const float duckTarget = comparing || bypass ? 0 : duckParameter->load();
     const bool guardOn = !bypass && guardParameter->load() > 0.5f;
-    float outMeter = outputPeak.load(), maxReduction = 0, maxDuck = 0;
+    float outMeter = outputPeak.load(), maxReduction = 0, maxDuck = 0, maxClash = 0;
     bool capturing = learning.load();
     std::array<float, pocket::scopeWaveCount> scopeLeft {}, scopeRight {};
     for (int sample = 0; sample < samples; ++sample)
@@ -154,6 +179,14 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
         }
         const float duckGain = duck.next(kick, duckSmoother.next(duckTarget));
         maxDuck = std::max(maxDuck, -pocket::dbFromGain(duckGain));
+        // Gather and duck every lane before correction: input and output buses can alias.
+        const auto beforeDuckL = l, beforeDuckR = r;
+        for (int i = 0; i < pocket::laneCount; ++i)
+            if (!bypass && roles[size_t(i)] == 1)
+            { l[size_t(i)] *= duckGain; r[size_t(i)] *= duckGain; }
+        if (capturing) clashAnalyser.push(l, r);
+        clashCorrection.process(l, r, bypass || comparing);
+        maxClash = std::max(maxClash, clashCorrection.reductionDb());
         float sumL = 0, sumR = 0;
         if (scopeActive)
             for (std::size_t i = pocket::scopeKick; i < pocket::scopeWaveCount; ++i)
@@ -161,8 +194,7 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
         for (int i = 0; i < pocket::laneCount; ++i)
         {
             const auto index = size_t(i);
-            const float attenuation = !bypass && roles[index] == 1 ? duckGain : 1;
-            const float processedL = l[index] * attenuation, processedR = r[index] * attenuation;
+            const float processedL = l[index], processedR = r[index];
             sumL += processedL; sumR += processedR;
             if (scopeActive)
             {
@@ -174,8 +206,8 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
                 }
                 else if (roles[index] == 1)
                 {
-                    scopeLeft[pocket::scopeBassBefore] += l[index];
-                    scopeRight[pocket::scopeBassBefore] += r[index];
+                    scopeLeft[pocket::scopeBassBefore] += beforeDuckL[index];
+                    scopeRight[pocket::scopeBassBefore] += beforeDuckR[index];
                     scopeLeft[pocket::scopeBassAfter] += processedL;
                     scopeRight[pocket::scopeBassAfter] += processedR;
                 }
@@ -199,13 +231,17 @@ void PocketBalanceProcessor::process(juce::AudioBuffer<float>& buffer, bool bypa
                 capturedRms[size_t(i)].store(m.rmsDb); capturedPeak[size_t(i)].store(m.peakDb);
                 capturedValid[size_t(i)].store(m.valid);
             }
+            publishClashes(clashAnalyser.finish());
+            for (size_t i = 0; i < learningClashSettings.size(); ++i)
+                capturedClashSettings[i].store(learningClashSettings[i]);
+            clashCaptureStable.store(learningClashStable);
             capturing = false; learning.store(false); learnProgress.store(1);
             ready.store(true, std::memory_order_release);
         }
     }
     if (capturing) learnProgress.store(float(captureSamples) / float(captureLength));
     for (int i = 0; i < pocket::laneCount; ++i) meters[size_t(i)].store(peaks[size_t(i)]);
-    outputPeak.store(outMeter); reduction.store(maxReduction); duckReduction.store(maxDuck);
+    outputPeak.store(outMeter); reduction.store(maxReduction); duckReduction.store(maxDuck); clashReduction.store(maxClash);
 }
 
 pocket::Suggestions PocketBalanceProcessor::getSuggestions() const
@@ -244,13 +280,13 @@ bool PocketBalanceProcessor::applyBalance()
         undoGains[size_t(i)] = value(laneId(i, "gain"));
         if (suggestions.valid[size_t(i)]) setParameterValue(laneId(i, "gain"), suggestions.gainDb[size_t(i)] * amount);
     }
-    canUndo = true; compare.store(false); return true;
+    canUndo = true; compare.store(false); stopClashPreview(); clashCaptureStable.store(false); return true;
 }
 void PocketBalanceProcessor::undoBalance()
 {
     if (!canUndo) return;
     for (int i = 0; i < pocket::laneCount; ++i) setParameterValue(laneId(i, "gain"), undoGains[size_t(i)]);
-    canUndo = false;
+    canUndo = false; stopClashPreview(); clashCaptureStable.store(false);
 }
 void PocketBalanceProcessor::resetLevels()
 {
@@ -259,7 +295,7 @@ void PocketBalanceProcessor::resetLevels()
         undoGains[size_t(i)] = value(laneId(i, "gain")); setParameterValue(laneId(i, "gain"), 0);
         setParameterValue(laneId(i, "mute"), 0); setParameterValue(laneId(i, "solo"), 0);
     }
-    canUndo = true; compare.store(false);
+    canUndo = true; compare.store(false); stopClashPreview(); clashCaptureStable.store(false);
 }
 juce::String PocketBalanceProcessor::laneName(int i) const
 { return parameters.state.getProperty("name" + juce::String(i), "Drum " + juce::String(i + 1).paddedLeft('0', 2)).toString(); }
@@ -272,9 +308,161 @@ void PocketBalanceProcessor::setStateInformation(const void* data, int size)
     if (auto xml = getXmlFromBinary(data, size))
         if (xml->hasTagName(parameters.state.getType()))
         {
-            parameters.replaceState(juce::ValueTree::fromXml(*xml));
+            auto state = juce::ValueTree::fromXml(*xml);
+            // Older sessions must clear a correction already enabled in this instance.
+            const std::array<const char*, 5> ids { "clash_enabled", "clash_source", "clash_trigger", "clash_band", "clash_depth" };
+            const std::array<float, 5> defaults { 0, 0, 1, 0, 2 };
+            for (size_t i = 0; i < ids.size(); ++i)
+                if (!state.getChildWithProperty("id", ids[i]).isValid())
+                {
+                    juce::ValueTree param("PARAM");
+                    param.setProperty("id", ids[i], nullptr); param.setProperty("value", defaults[i], nullptr);
+                    state.appendChild(param, nullptr);
+                }
+            clashWriters.fetch_add(1);
+            parameters.replaceState(state);
+            clashGeneration.fetch_add(1); clashWriters.fetch_sub(1);
             ready.store(false); learnCommand.store(2); compare.store(false); canUndo.store(false);
+            stopClashPreview(); clashUndoReady.store(false); clashCaptureStable.store(false);
         }
 }
+void PocketBalanceProcessor::startLearning()
+{
+    if (compare.load()) return;
+    stopClashPreview(); ready.store(false); clashCaptureStable.store(false); learnCommand.store(1);
+}
+void PocketBalanceProcessor::cancelLearning()
+{ stopClashPreview(); ready.store(false); clashCaptureStable.store(false); learnCommand.store(2); }
+
+std::array<float, PocketBalanceProcessor::captureSettingCount> PocketBalanceProcessor::currentClashSettings() const
+{
+    std::array<float, captureSettingCount> settings {};
+    for (int i = 0; i < pocket::laneCount; ++i)
+    {
+        const auto& p = laneParameters[size_t(i)]; const auto offset = size_t(i * 5);
+        settings[offset] = p.gain->load(); settings[offset + 1] = p.role->load();
+        settings[offset + 2] = p.mute->load(); settings[offset + 3] = p.solo->load();
+        settings[offset + 4] = getBus(true, i)->isEnabled() ? 1.0f : 0.0f;
+    }
+    settings.back() = duckParameter->load(); return settings;
+}
+bool PocketBalanceProcessor::hasFreshClashCapture() const
+{
+    if (!hasCapture() || isLearning() || !clashCaptureStable.load()) return false;
+    const auto current = currentClashSettings();
+    for (size_t i = 0; i < current.size(); ++i)
+        if (current[i] != capturedClashSettings[i].load()) return false;
+    return true;
+}
+void PocketBalanceProcessor::publishClashes(const pocket::ClashReport& report)
+{
+    reportGeneration.fetch_add(1);
+    for (int i = 0; i < report.count; ++i)
+    {
+        const auto& f = report.findings[size_t(i)]; auto& a = clashFindings[size_t(i)];
+        a.first.store(f.first); a.second.store(f.second); a.band.store(f.band);
+        a.reduceLane.store(f.reduceLane); a.protectLane.store(f.protectLane);
+        a.overlapSeconds.store(f.overlapSeconds); a.levelDifferenceDb.store(f.levelDifferenceDb);
+        a.strength.store(f.strength); a.episodes.store(f.episodes); a.sustained.store(f.sustained);
+    }
+    clashFindingCount.store(report.count);
+    reportGeneration.fetch_add(1);
+}
+pocket::ClashReport PocketBalanceProcessor::getClashReport() const
+{
+    pocket::ClashReport report;
+    if (!hasCapture()) return report;
+    const auto generation = reportGeneration.load();
+    if ((generation & 1u) != 0) return report;
+    report.count = std::clamp(clashFindingCount.load(), 0, pocket::maxClashFindings);
+    for (int i = 0; i < report.count; ++i)
+    {
+        const auto& a = clashFindings[size_t(i)]; auto& f = report.findings[size_t(i)];
+        f.first = a.first.load(); f.second = a.second.load(); f.band = a.band.load();
+        f.reduceLane = a.reduceLane.load(); f.protectLane = a.protectLane.load();
+        f.overlapSeconds = a.overlapSeconds.load(); f.levelDifferenceDb = a.levelDifferenceDb.load();
+        f.strength = a.strength.load(); f.episodes = a.episodes.load(); f.sustained = a.sustained.load();
+    }
+    if (generation != reportGeneration.load()) return {};
+    return report;
+}
+std::uint32_t PocketBalanceProcessor::packClash(const pocket::ClashConfig& config)
+{
+    if (!config.enabled || config.source < 0 || config.source >= pocket::laneCount
+        || config.trigger < 0 || config.trigger >= pocket::laneCount || config.source == config.trigger
+        || config.band < 0 || config.band >= pocket::clashBandCount || !std::isfinite(config.depthDb)) return 0;
+    return 1u | (std::uint32_t(config.source) << 1) | (std::uint32_t(config.trigger) << 5)
+        | (std::uint32_t(config.band) << 9) | (std::uint32_t(std::lround(std::clamp(config.depthDb, 0.0f, 3.0f) * 10)) << 12);
+}
+pocket::ClashConfig PocketBalanceProcessor::unpackClash(std::uint32_t packed)
+{
+    return { (packed & 1u) != 0, int((packed >> 1) & 15u), int((packed >> 5) & 15u),
+        int((packed >> 9) & 7u), float((packed >> 12) & 31u) * 0.1f };
+}
+pocket::ClashConfig PocketBalanceProcessor::appliedClash() const
+{
+    pocket::ClashConfig c;
+    if (!readAppliedClash(c)) return {};
+    return c;
+}
+bool PocketBalanceProcessor::readAppliedClash(pocket::ClashConfig& result) const
+{
+    const auto generation = clashGeneration.load();
+    if (clashWriters.load() != 0) return false;
+    pocket::ClashConfig c { clashParameters[0]->load() > 0.5f, int(clashParameters[1]->load()),
+        int(clashParameters[2]->load()), int(clashParameters[3]->load()), clashParameters[4]->load() };
+    if (!std::isfinite(c.depthDb)) c.depthDb = 0;
+    c.depthDb = std::clamp(c.depthDb, 0.0f, 3.0f);
+    if (c.source < 0 || c.source >= pocket::laneCount || c.trigger < 0 || c.trigger >= pocket::laneCount
+        || c.source == c.trigger || c.band < 0 || c.band >= pocket::clashBandCount) c.enabled = false;
+    if (clashWriters.load() != 0 || generation != clashGeneration.load()) return false;
+    result = c; return true;
+}
+bool PocketBalanceProcessor::previewClash(int findingIndex, float depthDb)
+{
+    if (!hasFreshClashCapture() || compare.load() || !std::isfinite(depthDb)) return false;
+    const auto report = getClashReport();
+    if (findingIndex < 0 || findingIndex >= report.count) return false;
+    const auto& f = report.findings[size_t(findingIndex)];
+    if (f.reduceLane < 0 || f.protectLane < 0) return false;
+    previewConfig.store(packClash({ true, f.reduceLane, f.protectLane, f.band, depthDb }));
+    return isClashPreviewing();
+}
+void PocketBalanceProcessor::setClashParameters(const pocket::ClashConfig& c)
+{
+    // A bounded generation check keeps the audio thread on the last coherent pair.
+    // The writer count also handles overlapping host recall and message-thread edits.
+    clashWriters.fetch_add(1);
+    setParameterValue("clash_enabled", 0);
+    setParameterValue("clash_source", float(c.source)); setParameterValue("clash_trigger", float(c.trigger));
+    setParameterValue("clash_band", float(c.band)); setParameterValue("clash_depth", c.depthDb);
+    setParameterValue("clash_enabled", c.enabled ? 1.0f : 0.0f);
+    clashGeneration.fetch_add(1); clashWriters.fetch_sub(1);
+}
+bool PocketBalanceProcessor::applyClash()
+{
+    const auto packed = previewConfig.load();
+    if (packed == 0 || !hasFreshClashCapture() || compare.load()) return false;
+    const auto config = unpackClash(packed), previous = appliedClash();
+    if (packClash(previous) != packed)
+    {
+        undoClashConfig = previous; clashUndoReady.store(true); setClashParameters(config);
+    }
+    stopClashPreview(); return true;
+}
+void PocketBalanceProcessor::undoClash()
+{
+    stopClashPreview();
+    if (!clashUndoReady.exchange(false)) return;
+    setClashParameters(undoClashConfig);
+}
+void PocketBalanceProcessor::disableClash()
+{
+    stopClashPreview(); auto config = appliedClash();
+    if (!config.enabled) return;
+    undoClashConfig = config; clashUndoReady.store(true);
+    config.enabled = false; setClashParameters(config);
+}
+
 juce::AudioProcessorEditor* PocketBalanceProcessor::createEditor() { return new PocketBalanceEditor(*this); }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new PocketBalanceProcessor(); }

@@ -24,3 +24,6 @@ SETUP*.txt
 *.pem
 *.key
 .vscode/
+package*/
+__pycache__/
+*.pyc

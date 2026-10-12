@@ -6,8 +6,13 @@ on:
       - 'Source/**'
       - 'Tests/**'
       - 'CMakeLists.txt'
+      - 'scripts/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY.md'
       - '.github/workflows/build.yml'
   pull_request:
+permissions:
+  contents: read
 jobs:
   build:
     strategy:
@@ -27,13 +32,8 @@ jobs:
         run: cmake --build build --config Release --parallel 3
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Package
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item 'build/PocketBalance_artefacts/Release/VST3/*' package -Recurse
-          if ($IsMacOS) { Copy-Item 'build/PocketBalance_artefacts/Release/AU/*' package -Recurse }
-          Copy-Item README.md,THIRD_PARTY.md package
+      - name: Package plugins and corresponding source
+        run: python scripts/Package.py --build build --output package
       - uses: actions/upload-artifact@v4
         with:
           name: Pocket-Balance-${{ matrix.os }}
