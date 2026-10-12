@@ -1,0 +1,40 @@
+name: Build native plugins
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'Source/**'
+      - 'Tests/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build.yml'
+  pull_request:
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Mac universal
+        if: runner.os == 'macOS'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64' -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Configure Windows x64
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel 3
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item 'build/PocketBalance_artefacts/Release/VST3/*' package -Recurse
+          if ($IsMacOS) { Copy-Item 'build/PocketBalance_artefacts/Release/AU/*' package -Recurse }
+          Copy-Item README.md,THIRD_PARTY.md package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pocket-Balance-${{ matrix.os }}
+          path: package/
