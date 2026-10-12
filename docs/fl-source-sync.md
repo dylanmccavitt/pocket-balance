@@ -36,9 +36,13 @@ The companion requires a current FL Studio version with MIDI scripting API 29 or
 7. Select the new IAC port under **Input**.
 8. Enable the input.
 9. Set **Controller type** to **Pocket Balance Source Sync (user)**.
+10. Set its **Port** to an unused number, such as **10**.
+11. Select **IAC Driver Pocket Balance Sync** under **Output**.
+12. Set its **Port** to the same number.
+13. Keep **Send master sync** off.
 
-No notes need to enter the port. FL Studio calls the companion's idle callback while the input is enabled.
-Do not enable MIDI master sync for this port. The companion sends no MIDI output.
+No notes need to enter the port. Match the numeric input and output ports so FL can run the companion's idle callback.
+An enabled input alone can load the script without running that callback. The companion sends no MIDI output.
 
 Apple documents the built-in driver in [Transfer MIDI information between apps](https://support.apple.com/en-ie/guide/audio-midi-setup/ams1013/mac).
 
@@ -50,6 +54,7 @@ The release does not include a virtual MIDI driver.
 For example, [loopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) provides virtual ports on supported Windows systems.
 Follow its installation instructions, create **Pocket Balance Sync**, and keep the utility running.
 Then enable that input in **Options > MIDI settings** and select **Pocket Balance Source Sync** as its controller type.
+Assign the same unused numeric **Port** to its Input and Output entries. Keep **Send master sync** off.
 
 Keep your performance keyboard on its current controller type. Assign this companion only to the dedicated input.
 
@@ -90,6 +95,7 @@ The **Follow FL Mixer names** panel accepts Mixer tracks **0–500**. Track **0*
 - Copying a plugin preset into another project requires checking and relinking its mapping.
 - Sidechain and normal routes can both be active. Route detection alone does not identify the correct plugin input.
 - This companion supports FL Studio. Other hosts retain manual source labels.
+- FL may mark the project modified as source-sync metadata updates.
 
 A successful name update does not prove that an input carries the correct audio. Play one source at a time and check its input meter.
 The companion cannot identify every routing edit that changes FL's input numbering. It does not automatically remap plugin inputs.
@@ -101,12 +107,17 @@ If names do not update, check these items in order:
 
 1. Confirm the companion input is enabled in **Options > MIDI settings**.
 2. Confirm its controller type is **Pocket Balance Source Sync**.
-3. Confirm Pocket Balance supports source-sync metadata parameters.
-4. Confirm the owner Mixer track and effect slot match the loaded plugin.
-5. Confirm the source mapping matches the Wrapper input assignment.
-6. Confirm the source has an active route to the owner track.
-7. Stop recording before checking name synchronization.
-8. Check **View > Script output** for a script error.
+3. Assign matching numeric Input and Output ports. A Port displaying `...` is unassigned.
+4. Confirm Pocket Balance supports source-sync metadata parameters.
+5. Confirm the owner Mixer track and effect slot match the loaded plugin.
+6. Confirm the source mapping matches the Wrapper input assignment.
+7. Confirm the source has an active route to the owner track.
+8. Stop recording before checking name synchronization.
+9. Check **View > Script output** for a script error or missing-port warning.
+
+The startup message confirms that FL loaded the script. It does not prove that background updates are running.
+If needed, select the companion's tab in **Script output** and run `import device; print(device.getPortNumber(), device.isAssigned())`.
+The result should show the chosen port number and a true value for the linked output.
 
 If several companion inputs are enabled, keep only one enabled. Two scripts can compete for the same metadata stream.
 Keep the script and plugin from the same release. Older Pocket Balance versions do not contain the required metadata interface.

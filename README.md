@@ -5,8 +5,8 @@ A native drum mixer for FL Studio and other hosts with multiple plugin inputs.
 **Version 0.4.0:** adds FL Mixer source-name synchronization to the 16-input drum mixer, balance suggestions, and frequency-clash workflow.
 The plugin suggests levels. You keep control of the mix.
 
-Download the [0.3.0 prerelease for Mac or Windows](https://github.com/dylanmccavitt/pocket-balance/releases/tag/v0.3.0).
-Version 0.4.0 is undergoing [host validation](docs/validation-0.4.md). See the [0.3 validation record](docs/validation-0.3.md) for the previous release.
+Download the [0.4.0 prerelease for Mac or Windows](https://github.com/dylanmccavitt/pocket-balance/releases/tag/v0.4.0).
+See the [0.4 validation record](docs/validation-0.4.md) for completed checks and remaining platform limits.
 
 ![Frequency clash analysis and reversible preview](docs/frequency-clashes.png)
 
@@ -32,8 +32,10 @@ Use additional instances for more than 16 sources. Each instance balances its ow
 
 Mac VST3, Audio Unit, and standalone targets are provided. The Mac build targets Apple Silicon and Intel.
 Windows VST3 and standalone targets use the same source, with a native Windows build script.
-Version 0.4.0 passes native Mac universal and Windows x64 builds, with five CTest suites and 28 companion tests on each platform.
+Version 0.4.0 passes native Mac universal and Windows x64 builds, with five CTest suites and 31 companion tests on each platform.
 The installed Mac VST3 and AU also pass pluginval strictness 5, including editor checks.
+Live Mac FL Studio checks passed for source transfer, Mixer renaming, and project save/reopen without changing audio controls.
+Windows DAW playback remains unverified.
 See [validation details](docs/validation-0.4.md) and [GitHub Actions](https://github.com/dylanmccavitt/pocket-balance/actions) for platform results and limits.
 The standalone application is for development and audio-interface inputs; it does not receive tracks from another DAW.
 
@@ -91,17 +93,20 @@ Local development builds are not Apple-notarized releases.
 ## Install or update on Windows
 
 The standard Windows VST3 installation folder is `C:\Program Files\Common Files\VST3\`.
-Copy the entire `Pocket Balance.vst3` bundle, including its `Contents` directory.
+Save your project and close FL Studio before replacing an installed plugin.
+Copy the entire `Pocket Balance.vst3` bundle, including its `Contents` directory. This system folder requires administrator permissions.
+Preserve the previous bundle outside FL Studio's search paths before replacing it.
 Use only one installed copy of Pocket Balance in FL Studio's search paths.
-
-After building and validating this update, save the FL Studio project and close FL Studio. Updating this system folder requires administrator permissions.
-The included `scripts/Deploy-Windows.ps1` refuses to run while FL Studio is open; it does not close the host or save projects automatically.
-It stages and hash-checks the new bundle, preserves the complete previous installation in a uniquely named folder under `backups/`, and then replaces the installed bundle.
-The script reports both the installed path and the backup path. It does not delete the previous version.
 Reopen FL Studio and scan plugins if needed. Version 0.4.0 retains the same plugin identity so it updates existing instances.
 
+For source builds, `scripts/Deploy-Windows.ps1` provides an alternative after building and validating the update.
+Run it from the extracted source repository with its completed build tree, not from the binary download folder.
+The script refuses to run while FL Studio is open; it does not close the host or save projects automatically.
+It stages and hash-checks the new bundle, preserves the complete previous installation in a uniquely named folder under `backups/`, and then replaces the installed bundle.
+The script reports both the installed path and the backup path. It does not delete the previous version.
+
 ```powershell
-# From an elevated PowerShell window:
+# From the source repository in an elevated PowerShell window:
 .\scripts\Deploy-Windows.ps1
 ```
 
@@ -158,7 +163,7 @@ Host tests cover dropdown changes and saved display settings.
 
 ## Balance a loop
 
-1. Double-click each source name to label it.
+1. Link FL Mixer names, or double-click unlinked source labels to edit them.
 2. Select the correct role for each drum.
 3. Play a representative loop that includes all drums.
 4. Press **Listen / 8 seconds**.
