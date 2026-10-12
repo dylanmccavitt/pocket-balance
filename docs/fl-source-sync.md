@@ -72,7 +72,7 @@ A tom retains its existing **Percussion** role when its source name changes.
 
 The mapping is stored with the plugin state. The companion rediscovers loaded instances after project loading.
 It checks the stored owner track and effect slot before sending names. Each instance receives its own mapped labels.
-The **Follow FL Mixer names** panel accepts Mixer tracks **0–126**. Track **0** is Master.
+The **Follow FL Mixer names** panel accepts Mixer tracks **0–500**. Track **0** is Master.
 
 ## Behavior and limits
 

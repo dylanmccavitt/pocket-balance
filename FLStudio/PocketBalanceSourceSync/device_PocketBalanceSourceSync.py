@@ -20,6 +20,8 @@ CONTEXT_NAME = "source_sync_context"
 MAP_NAMES = tuple("source_sync_map" + str(n + 1) for n in range(16))
 PARAMETER_LIMIT = 110
 SLOT_COUNT = 10
+MAX_TRACK = 500
+KNOWN_POLL_TICKS = 30
 SCAN_BATCH = 4
 LINK_BATCH = 4
 RETRY_TICKS = 8
@@ -44,19 +46,19 @@ def decode_word(value):
 def decode_mapping(value):
     if not isinstance(value, (int, float)) or not (0 <= value < 1):
         raise ValueError("Invalid source mapping")
-    scaled = value * 256
+    scaled = value * 1024
     raw = int(scaled + 0.5)
-    if raw > 255 or abs(raw - scaled) > 0.0001:
+    if raw > MAX_TRACK + 1 or abs(raw - scaled) > 0.0001:
         raise ValueError("Inexact source mapping")
     return raw - 1
 
 
 def context_owner(context):
-    return (context & 255) - 1, ((context >> 8) & 15) - 1
+    return (context & 1023) - 1, ((context >> 10) & 15) - 1
 
 
 def context_is_linked(context):
-    return bool(context & 4096)
+    return bool(context & 16384)
 
 
 def crc16(data):
@@ -79,14 +81,14 @@ def source_text(name, source):
 
 def encode_name(lane, source, name, context):
     """Return (opcode, payload) pairs. The sender adds alternating phase bits."""
-    if not 0 <= lane < 16 or not 0 <= source < 255 or not 0 <= context < PHASE:
+    if not 0 <= lane < 16 or not 0 <= source <= MAX_TRACK or not 0 <= context < PHASE:
         raise ValueError("Source-sync identity is out of range")
     encoded = source_text(name, source).encode("utf-8", "replace")
-    body = bytes([source]) + encoded
+    body = bytes([source >> 8, source & 255]) + encoded
     length = len(body)
-    if length < 2 or length > 257:
+    if length < 3 or length > 258:
         raise ValueError("Source label is too long")
-    nonce = (context >> 13) & 127
+    nonce = (context >> 15) & 127
     header = bytes([1, lane, length >> 8, length & 255, nonce,
                     (context >> 16) & 255, (context >> 8) & 255, context & 255])
     result = [(BEGIN, (lane << 16) | (length << 7) | nonce)]
@@ -204,6 +206,8 @@ class Link:
 class Companion:
     def __init__(self):
         self.links = {}
+        self.known_slots = {}
+        self.focus_after = 0
         self.tick = 0
         self.scan_cursor = 0
         self.scan_after = 0
@@ -213,6 +217,8 @@ class Companion:
 
     def clear(self, loading=False):
         self.links.clear()
+        self.known_slots.clear()
+        self.focus_after = 0
         self.scan_cursor = 0
         self.scan_after = 0
         self.refresh_requested = True
@@ -226,8 +232,6 @@ class Companion:
 
     @staticmethod
     def _indices(track, slot):
-        if not plugins.isValid(track, slot) or plugins.getPluginName(track, slot, 0) != "Pocket Balance":
-            return None
         names = {}
         for index in range(min(PARAMETER_LIMIT, plugins.getParamCount(track, slot))):
             name = plugins.getParamName(index, track, slot)
@@ -244,6 +248,12 @@ class Companion:
 
     def _discover(self, track, slot):
         key = (track, slot)
+        if not plugins.isValid(track, slot) or plugins.getPluginName(track, slot, 0) != "Pocket Balance":
+            self.links.pop(key, None)
+            self.known_slots.pop(key, None)
+            return
+        # Remember unlinked instances so Link does not wait for a full sweep.
+        self.known_slots[key] = self.tick + KNOWN_POLL_TICKS
         indices = self._indices(track, slot)
         if indices is None:
             self.links.pop(key, None)
@@ -259,13 +269,40 @@ class Companion:
             lambda: plugins.getParamValue(indices[ACK_NAME], track, slot),
             lambda value: plugins.setParamValue(value, indices[PACKET_NAME], track, slot, 0))
 
+    def _try_discover(self, key):
+        try:
+            self._discover(*key)
+        except (ValueError, RuntimeError, TypeError, IndexError):
+            self.links.pop(key, None)
+            if key in self.known_slots:
+                self.known_slots[key] = self.tick + KNOWN_POLL_TICKS
+
     def _scan(self):
+        # Reserve two discovery slots for focused/known instances and retain
+        # two for the background sweep. Neither path can starve the other.
+        priority = []
+        if self.tick >= self.focus_after:
+            self.focus_after = self.tick + KNOWN_POLL_TICKS
+            focus = mixer.getActiveEffectIndex()
+            if (isinstance(focus, (tuple, list)) and len(focus) == 2
+                    and 0 <= focus[0] <= MAX_TRACK and 0 <= focus[1] < SLOT_COUNT):
+                key = tuple(focus)
+                if self.known_slots.get(key, 0) <= self.tick:
+                    priority.append(key)
+        due = sorted((when, key) for key, when in self.known_slots.items() if when <= self.tick)
+        for unused, key in due:
+            if key not in priority:
+                priority.append(key)
+            if len(priority) >= 2:
+                break
+        for key in priority:
+            self._try_discover(key)
         if self.tick < self.scan_after and not self.refresh_requested:
             return
-        # trackCount includes Master and FL's Current utility track. No routing
-        # is inferred from this traversal, and no plugin audio parameter is set.
-        total = max(0, min(255, mixer.trackCount())) * SLOT_COUNT
-        for unused in range(SCAN_BATCH):
+        # trackCount includes Master and FL's Current utility track. The
+        # protocol supports numbered inserts 0..500, without the utility track.
+        total = max(0, min(MAX_TRACK + 1, mixer.trackCount())) * SLOT_COUNT
+        for unused in range(SCAN_BATCH - len(priority)):
             if self.scan_cursor >= total:
                 self.scan_cursor = 0
                 self.scan_after = self.tick + SCAN_PAUSE_TICKS
@@ -273,10 +310,9 @@ class Companion:
                 return
             position = self.scan_cursor
             self.scan_cursor += 1
-            try:
-                self._discover(position // SLOT_COUNT, position % SLOT_COUNT)
-            except (ValueError, RuntimeError, TypeError, IndexError):
-                self.links.pop((position // SLOT_COUNT, position % SLOT_COUNT), None)
+            key = (position // SLOT_COUNT, position % SLOT_COUNT)
+            if self.known_slots.get(key, 0) <= self.tick:
+                self._try_discover(key)
 
     def _snapshot(self, link):
         context = self._read_context(link.track, link.slot, link.indices)
@@ -286,7 +322,7 @@ class Companion:
                     for name in MAP_NAMES]
         names = {}
         mask = 0
-        count = min(255, mixer.trackCount())
+        count = min(MAX_TRACK + 1, mixer.trackCount())
         for lane, source in enumerate(mappings):
             if 0 <= source < count and source != link.track and mixer.getRouteSendActive(source, link.track):
                 names[lane] = (source, source_text(mixer.getTrackName(source), source))
@@ -317,15 +353,15 @@ class Companion:
                         or plugins.getParamName(link.indices[PACKET_NAME], *key) != PACKET_NAME
                         or plugins.getParamName(link.indices[CONTEXT_NAME], *key) != CONTEXT_NAME
                         or self._read_context(*key, link.indices) != link.context):
-                    del self.links[key]
-                    self.refresh_requested = True
+                    # Re-read this exact slot now. Do not wait for the scanner
+                    # to traverse hundreds of other Mixer tracks after relink.
+                    self._try_discover(key)
                     continue
                 active = link.active_name
                 route_removed = active is not None and not mixer.getRouteSendActive(active[1], link.track)
                 if route_removed or self.tick - link.snapshot_at >= SNAPSHOT_TICKS:
                     if not self._snapshot(link):
-                        del self.links[key]
-                        self.refresh_requested = True
+                        self._try_discover(key)
                         continue
                 link.step(self.tick)
             except (ValueError, RuntimeError, TypeError, IndexError):

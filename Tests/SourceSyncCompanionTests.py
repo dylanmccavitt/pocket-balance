@@ -15,7 +15,7 @@ spec.loader.exec_module(sync)
 
 
 def context(track=20, slot=0, revision=11, linked=True):
-    return (track + 1) | ((slot + 1) << 8) | (4096 if linked else 0) | (revision << 13)
+    return (track + 1) | ((slot + 1) << 10) | (16384 if linked else 0) | (revision << 15)
 
 
 class Receiver:
@@ -71,7 +71,7 @@ class Receiver:
                         remainder ^= 4129
             if remainder != payload >> 4:
                 raise AssertionError("CRC mismatch")
-            self.names[lane] = (body[0], body[1:].decode("utf-8"))
+            self.names[lane] = ((body[0] << 8) | body[1], body[2:].decode("utf-8"))
             self.active = None
         self.ack = word
 
@@ -95,6 +95,20 @@ class ProtocolTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 sync.decode_word(value)
 
+    def test_500_track_context_and_mapping_boundaries(self):
+        packed = context(500, 9, 255)
+        self.assertEqual(sync.context_owner(packed), (500, 9))
+        self.assertTrue(sync.context_is_linked(packed))
+        self.assertEqual(sync.decode_word(packed / sync.SCALE), packed)
+        self.assertEqual(sync.decode_mapping(501 / 1024), 500)
+        self.assertEqual(sync.decode_mapping(0), -1)
+        with self.assertRaises(ValueError):
+            sync.decode_mapping(502 / 1024)
+        words = sync.encode_name(15, 500, "🥁" * 64, packed)
+        self.assertEqual((words[0][1] >> 7) & 511, 258)
+        self.assertEqual(words[1], (sync.DATA, 500))
+        self.assertEqual(words[0][1] & 127, 127)
+
     def test_unicode_maximum_and_wraparound(self):
         receiver = Receiver(context())
         link = sync.Link(20, 0, {}, receiver.context, receiver.read, receiver.write)
@@ -110,10 +124,10 @@ class ProtocolTests(unittest.TestCase):
     def test_encoder_has_fixed_wire_vector(self):
         # Exposes the agreed protocol without depending on the receiver mock.
         words = sync.encode_name(2, 14, "Hat", context())
-        self.assertEqual(words[0], (1, (2 << 16) | (4 << 7) | 11))
-        self.assertEqual(words[1:3], [(2, 0x0e48), (2, 0x16174)])
-        expected_crc = sync.crc16(bytes([1, 2, 0, 4, 11, 1, 113, 21, 14, 72, 97, 116]))
-        self.assertEqual(words[3], (3, (expected_crc << 4) | 11))
+        self.assertEqual(words[0], (1, (2 << 16) | (5 << 7) | 11))
+        self.assertEqual(words[1:4], [(2, 0x000e), (2, 0x14861), (2, 0x27400)])
+        expected_crc = sync.crc16(bytes([1, 2, 0, 5, 11, 5, 196, 21, 0, 14, 72, 97, 116]))
+        self.assertEqual(words[4], (3, (expected_crc << 4) | 11))
 
     def test_empty_name_and_utf8_byte_limit(self):
         self.assertEqual(sync.source_text("  ", 13), "Mixer 13")
@@ -126,7 +140,7 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sync.encode_name(16, 1, "Kick", context())
         with self.assertRaises(ValueError):
-            sync.encode_name(0, 255, "Kick", context())
+            sync.encode_name(0, 501, "Kick", context())
 
     def test_long_ascii_and_host_whitespace_round_trip(self):
         receiver = Receiver(context())
@@ -223,12 +237,15 @@ class FakeHost:
     def __init__(self):
         self.instances = {}
         self.routes = set()
+        self.count = 24
+        self.focus = None
         self.track_names = {12: "Kick", 13: "Closed Hat", 14: "Tom", 18: "808"}
         self.writes = []
         self.param_reads = []
         self.safe = True
         self.add(20, 0, {0: 12, 3: 14, 7: 18})
-        sync.mixer.trackCount = lambda: 24
+        sync.mixer.trackCount = lambda: self.count
+        sync.mixer.getActiveEffectIndex = lambda: self.focus
         sync.mixer.getTrackName = lambda track: self.track_names.get(track, "Insert " + str(track))
         sync.mixer.getRouteSendActive = lambda source, dest: (source, dest) in self.routes
         sync.plugins.isValid = lambda track, slot: (track, slot) in self.instances
@@ -261,7 +278,7 @@ class FakeHost:
         if name == sync.ACK_NAME:
             return instance["receiver"].read()
         if name in sync.MAP_NAMES:
-            return (instance["mapping"].get(sync.MAP_NAMES.index(name), -1) + 1) / 256
+            return (instance["mapping"].get(sync.MAP_NAMES.index(name), -1) + 1) / 1024
         raise AssertionError("Companion read an audio parameter")
 
     def set_value(self, value, index, track, slot, pickup):
@@ -289,6 +306,52 @@ class HostTests(unittest.TestCase):
         self.assertEqual(host.instances[(21, 1)]["receiver"].names, {2: (13, "Closed Hat")})
         self.assertLess(max(host.param_reads), sync.PARAMETER_LIMIT)
         self.assertEqual(set(write[2] for write in host.writes), {74})
+
+    def test_focused_new_instance_on_track_500_is_discovered_first(self):
+        host = FakeHost()
+        host.count = 502
+        host.focus = (500, 9)
+        host.track_names[300] = "High insert"
+        host.add(500, 9, {2: 300}, revision=255)
+        companion = sync.Companion()
+        host.drive(companion, 30)
+        self.assertEqual(host.instances[(500, 9)]["receiver"].names, {2: (300, "High insert")})
+
+    def test_background_sweep_includes_track_500(self):
+        host = FakeHost()
+        host.count = 502
+        host.add(500, 0, {15: 499})
+        companion = sync.Companion()
+        host.drive(companion, 1500)
+        self.assertEqual(host.instances[(500, 0)]["receiver"].names, {15: (499, "Insert 499")})
+
+    def test_cached_unlinked_instance_links_without_full_sweep(self):
+        host = FakeHost()
+        host.count = 502
+        host.instances[(20, 0)]["context"] = context(linked=False)
+        companion = sync.Companion()
+        host.drive(companion, 100)
+        self.assertIn((20, 0), companion.known_slots)
+        self.assertNotIn((20, 0), companion.links)
+        host.add(20, 0, {5: 13}, revision=40)
+        companion.scan_cursor = 3000
+        host.drive(companion, sync.KNOWN_POLL_TICKS + 1)
+        self.assertTrue(host.writes)
+        host.drive(companion, 30)
+        self.assertEqual(host.instances[(20, 0)]["receiver"].names, {5: (13, "Closed Hat")})
+
+    def test_changed_context_is_rediscovered_in_same_link_callback(self):
+        host = FakeHost()
+        companion = sync.Companion()
+        host.drive(companion, 100)
+        host.count = 502
+        companion.scan_cursor = 3000
+        companion.known_slots[(20, 0)] = 10000
+        host.add(20, 0, {9: 13}, revision=99)
+        companion.idle()
+        self.assertEqual(companion.links[(20, 0)].context, context(revision=99))
+        host.drive(companion, 30)
+        self.assertEqual(host.instances[(20, 0)]["receiver"].names, {9: (13, "Closed Hat")})
 
     def test_mixer_rename_and_inactive_route(self):
         host = FakeHost()
