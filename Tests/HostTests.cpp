@@ -560,8 +560,11 @@ void testSourceSyncProbe()
     const float value = float(0xabcdef) / 16777216.0f;
     packet->setValue(value);
     near(ack->getValue(), 0, 0, "Packet setter does not run message-thread work");
-    juce::Thread::sleep(75);
-    juce::Timer::callPendingTimersSynchronously();
+    for (int i = 0; i < 200 && ack->getValue() == 0.0f; ++i)
+    {
+        juce::Timer::callPendingTimersSynchronously();
+        juce::Thread::sleep(5);
+    }
     near(ack->getValue(), value, 0, "Message-thread timer echoes an exact 24-bit word");
     ack->setValue(0);
     near(ack->getValue(), value, 0, "Host cannot write acknowledgement");
