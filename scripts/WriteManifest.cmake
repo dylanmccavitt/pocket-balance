@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Called only after a plugin target finishes building.
-file(GLOB_RECURSE SOURCE_FILES RELATIVE "${SOURCE_DIR}" "${SOURCE_DIR}/Source/*" "${SOURCE_DIR}/Tests/*")
+file(GLOB_RECURSE SOURCE_FILES RELATIVE "${SOURCE_DIR}" "${SOURCE_DIR}/Source/*" "${SOURCE_DIR}/Tests/*" "${SOURCE_DIR}/FLStudio/*")
+list(FILTER SOURCE_FILES EXCLUDE REGEX "(__pycache__/|\\.pyc$)")
 list(APPEND SOURCE_FILES CMakeLists.txt)
 list(SORT SOURCE_FILES)
 set(SOURCE_SIGNATURE "")

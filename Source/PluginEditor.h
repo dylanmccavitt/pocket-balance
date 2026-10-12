@@ -45,6 +45,7 @@ private:
     };
     void timerCallback() override;
     void showRouting();
+    void showSourceMapping();
     void selectPage(int);
     void selectAnalysisView(int);
     PocketBalanceProcessor& owner;
@@ -57,6 +58,8 @@ private:
     std::array<std::unique_ptr<Lane>, pocket::laneCount> lanes;
     juce::TextButton listen { "Listen  /  8 seconds" }, apply { "Apply balance" }, undo { "Undo levels" };
     juce::TextButton compare { "Bypass balance" }, reset { "Reset levels" }, help { "Routing guide" };
+    juce::TextButton sourceNames { "FL source names" };
+    juce::Label sourceSyncStatus;
     juce::TextButton pageOne { "01 - 08" }, pageTwo { "09 - 16" }, guard { "Peak guard" };
     juce::Slider amount, duck, output;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> amountAttachment, duckAttachment, outputAttachment;

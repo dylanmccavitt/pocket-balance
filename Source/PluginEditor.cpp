@@ -26,6 +26,96 @@ void meter(juce::Graphics& g, juce::Rectangle<float> bounds, float peak)
     g.setColour(peak >= 1 ? orange : accent.withAlpha(0.8f));
     g.fillRoundedRectangle(bounds.withWidth(std::max(0.0f, bounds.getWidth() * fraction)), 3);
 }
+
+class SourceMappingPanel final : public juce::Component
+{
+public:
+    SourceMappingPanel(PocketBalanceProcessor& processor,
+                       std::function<void(int, int, const std::array<int, pocket::laneCount>&)> save,
+                       std::function<void()> unlink)
+    {
+        setLookAndFeel(&look);
+        const auto mapping = processor.sourceMapping();
+        auto field = [this](juce::TextEditor& editor, const juce::String& title, int value)
+        {
+            editor.setName(title); editor.setInputRestrictions(3, "0123456789");
+            if (value >= 0) editor.setText(juce::String(value));
+            addAndMakeVisible(editor);
+        };
+        field(track, "Pocket Balance Mixer track number", processor.sourceOwnerTrack());
+        field(slot, "Pocket Balance effect slot number, 1 to 10",
+              processor.sourceOwnerSlot() < 0 ? -1 : processor.sourceOwnerSlot() + 1);
+        for (int i = 0; i < pocket::laneCount; ++i)
+        {
+            field(inputs[size_t(i)], "Input " + juce::String(i + 1) + " source Mixer track number", mapping[size_t(i)]);
+            names[size_t(i)] = processor.laneName(i);
+        }
+        for (auto* button : { &link, &disconnect, &cancel }) addAndMakeVisible(button);
+        link.onClick = [this, save]
+        {
+            if (track.isEmpty() || slot.isEmpty() || track.getText().getIntValue() > 500
+                || slot.getText().getIntValue() < 1 || slot.getText().getIntValue() > 10)
+            { error = "Enter the plugin's Mixer track (0–500) and effect slot (1–10)."; repaint(); return; }
+            std::array<int, pocket::laneCount> selected;
+            bool any = false;
+            for (int i = 0; i < pocket::laneCount; ++i)
+            {
+                const auto value = inputs[size_t(i)].getText();
+                selected[size_t(i)] = value.isEmpty() ? -1 : value.getIntValue();
+                if (selected[size_t(i)] > 500 || selected[size_t(i)] == track.getText().getIntValue())
+                { error = "Each source must be a different Mixer track from the plugin's track."; repaint(); return; }
+                any |= selected[size_t(i)] >= 0;
+            }
+            if (!any) { error = "Enter at least one source Mixer track number."; repaint(); return; }
+            save(track.getText().getIntValue(), slot.getText().getIntValue() - 1, selected);
+            close();
+        };
+        disconnect.onClick = [this, unlink] { unlink(); close(); };
+        cancel.onClick = [this] { close(); };
+        setSize(660, 630);
+    }
+    ~SourceMappingPanel() override { setLookAndFeel(nullptr); }
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(background);
+        text(g, "Follow FL Mixer names", { 24, 16, 600, 30 }, 21, ink, true);
+        g.setColour(muted); g.setFont(font(13));
+        g.drawFittedText("Enable the Pocket Balance Source Sync controller script in FL first.\n"
+                        "Match these inputs to Wrapper > Processing > Connections.\n"
+                        "Names follow the Mixer. Your roles and audio settings stay unchanged.",
+                        { 24, 54, 612, 66 }, juce::Justification::topLeft, 3);
+        text(g, "Plugin's Mixer track", { 24, 128, 190, 24 }, 13);
+        text(g, "Effect slot", { 354, 128, 140, 24 }, 13);
+        text(g, "INPUT / CURRENT LABEL", { 24, 174, 228, 20 }, 10, muted);
+        text(g, "MIXER #", { 252, 174, 68, 20 }, 10, muted);
+        text(g, "INPUT / CURRENT LABEL", { 354, 174, 228, 20 }, 10, muted);
+        text(g, "MIXER #", { 582, 174, 68, 20 }, 10, muted);
+        for (int i = 0; i < pocket::laneCount; ++i)
+            text(g, juce::String(i + 1).paddedLeft('0', 2) + "  " + names[size_t(i)],
+                 { 24 + (i / 8) * 330, 200 + (i % 8) * 36, 218, 28 }, 12);
+        g.setColour(muted); g.setFont(font(12));
+        g.drawFittedText("Leave unused inputs blank. Re-link after changing Wrapper connections.\n"
+                        "This mapping saves with the project. It does not change audio routing.",
+                        { 24, 498, 612, 40 }, juce::Justification::topLeft, 2);
+        text(g, error, { 24, 542, 612, 24 }, 12, orange);
+    }
+    void resized() override
+    {
+        track.setBounds(224, 128, 72, 28); slot.setBounds(534, 128, 72, 28);
+        for (int i = 0; i < pocket::laneCount; ++i)
+            inputs[size_t(i)].setBounds(250 + (i / 8) * 330, 200 + (i % 8) * 36, 66, 28);
+        disconnect.setBounds(24, 578, 150, 32); cancel.setBounds(354, 578, 110, 32);
+        link.setBounds(478, 578, 158, 32);
+    }
+private:
+    void close() { if (auto* dialog = findParentComponentOfClass<juce::DialogWindow>()) dialog->exitModalState(0); }
+    PocketLookAndFeel look;
+    juce::TextEditor track, slot;
+    std::array<juce::TextEditor, pocket::laneCount> inputs;
+    std::array<juce::String, pocket::laneCount> names;
+    juce::TextButton link { "Link source names" }, disconnect { "Unlink names" }, cancel { "Cancel" };
+    juce::String error;
+};
 }
 
 PocketLookAndFeel::PocketLookAndFeel()
@@ -80,7 +170,7 @@ void PocketLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int wi
 PocketBalanceEditor::Lane::Lane(PocketBalanceProcessor& p, int i) : owner(p), index(i)
 {
     name.setText(p.laneName(i), juce::dontSendNotification); name.setEditable(false, true);
-    name.setFont(font(13, true)); name.setTooltip("Source: " + p.laneName(i) + "\nDouble-click to name this source. FL does not share routed channel names with VST3 effects.");
+    name.setFont(font(13, true)); name.setTooltip("Source: " + p.laneName(i) + "\nUse FL source names to follow a Mixer track, or double-click to name this source manually.");
     name.onTextChange = [this]
     {
         owner.parameters.state.setProperty("autoRole" + juce::String(index), autoRole.getToggleState(), nullptr);
@@ -95,7 +185,7 @@ PocketBalanceEditor::Lane::Lane(PocketBalanceProcessor& p, int i) : owner(p), in
     const auto identityKey = "autoRole" + juce::String(i);
     autoRole.setToggleState(bool(p.parameters.state.getProperty(identityKey, p.laneName(i).startsWith("Drum "))), juce::dontSendNotification);
     autoRole.onClick = [this, identityKey] { owner.parameters.state.setProperty(identityKey, autoRole.getToggleState(), nullptr); updateIdentity(); };
-    autoRole.setTooltip("Follow recognizable words in this source label, such as kick, 808, clap, or hat. Unknown names keep the current role. This does not read FL channel names.");
+    autoRole.setTooltip("Infer a role when you manually edit the source label or click Auto. Automatic FL name updates preserve the current role.");
     slider(gain, " dB"); gain.setTooltip("Manual level. Double-click the fader to return to 0 dB.");
     mute.setClickingTogglesState(true); solo.setClickingTogglesState(true);
     mute.setTooltip("Mute this input."); solo.setTooltip("Listen to this input. Multiple solos are supported.");
@@ -154,13 +244,13 @@ void PocketBalanceEditor::Lane::refresh(const pocket::Suggestions& suggestions, 
     if (!name.isBeingEdited() && name.getText() != owner.laneName(index))
     {
         name.setText(owner.laneName(index), juce::dontSendNotification);
-        name.setTooltip("Source: " + owner.laneName(index) + "\nDouble-click to rename. Auto follows this label; FL channel names are not synced.");
+        name.setTooltip("Source: " + owner.laneName(index) + "\n" + owner.sourceSyncStatus() + "\nAutomatic Mixer name updates preserve this role.");
     }
     repaint();
 }
 void PocketBalanceEditor::Lane::updateIdentity()
 {
-    name.setTooltip("Source: " + owner.laneName(index) + "\nDouble-click to rename. Auto follows this label; FL channel names are not synced.");
+    name.setTooltip("Source: " + owner.laneName(index) + "\n" + owner.sourceSyncStatus());
     if (!autoRole.getToggleState()) return;
     const int inferred = pocket::inferRole(owner.laneName(index).toStdString());
     if (inferred >= 0 && inferred != int(owner.value(owner.laneId(index, "role"))))
@@ -192,7 +282,7 @@ PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProce
     addAndMakeVisible(analysisView);
     selectAnalysisView(observedAnalysisView);
     for (int i = 0; i < pocket::laneCount; ++i) { lanes[size_t(i)] = std::make_unique<Lane>(p, i); addChildComponent(lanes[size_t(i)].get()); }
-    for (auto* b : { &listen, &apply, &undo, &compare, &reset, &help, &pageOne, &pageTwo, &guard }) addAndMakeVisible(b);
+    for (auto* b : { &listen, &apply, &undo, &compare, &reset, &help, &sourceNames, &pageOne, &pageTwo, &guard }) addAndMakeVisible(b);
     listen.setColour(juce::TextButton::buttonColourId, accent);
     listen.setColour(juce::TextButton::textColourOffId, background);
     listen.onClick = [this] { balanceApplied = false; if (owner.isLearning()) owner.cancelLearning(); else owner.startLearning(); };
@@ -208,6 +298,11 @@ PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProce
     compare.setTooltip("Bypass balance, kick ducking, and frequency correction while keeping all routed drums audible. Output trim, peak guard, mute and solo stay active. Use this instead of FL's plugin power switch, which drops auxiliary inputs.");
     reset.setTooltip("Reset all drum levels, mute, and solo. Undo restores the previous levels.");
     help.onClick = [this] { showRouting(); };
+    sourceNames.onClick = [this] { showSourceMapping(); };
+    sourceNames.setTooltip("Link each input to its FL Mixer track. Requires the Pocket Balance Source Sync controller script.");
+    sourceSyncStatus.setName("FL source name sync status");
+    sourceSyncStatus.setFont(font(10)); sourceSyncStatus.setColour(juce::Label::textColourId, muted);
+    addAndMakeVisible(sourceSyncStatus);
     pageOne.onClick = [this] { selectPage(0); }; pageTwo.onClick = [this] { selectPage(1); };
     guard.setClickingTogglesState(true);
     guard.setTooltip("Stereo-linked, zero-latency sample-peak protection at -1 dBFS. Heavy reduction can change transients. Not true-peak limiting.");
@@ -294,6 +389,8 @@ void PocketBalanceEditor::resized()
     undo.setBounds(406, 323, 138, 39);
     help.setBounds(w - 152, 392, 128, 28);
     pageOne.setBounds(164, 392, 86, 28); pageTwo.setBounds(258, 392, 86, 28);
+    sourceNames.setBounds(358, 392, 148, 28);
+    sourceSyncStatus.setBounds(280, getHeight() - 25, w - 780, 20);
     compare.setBounds(w - 454, 392, 132, 28); reset.setBounds(w - 308, 392, 138, 28);
     const int rowHeight = (getHeight() - 574) / 8;
     for (int i = 0; i < pocket::laneCount; ++i) lanes[size_t(i)]->setBounds(24, 448 + (i % 8) * rowHeight, w - 48, rowHeight - 3);
@@ -305,8 +402,25 @@ void PocketBalanceEditor::resized()
 }
 void PocketBalanceEditor::timerCallback()
 { refreshDisplay(); }
+void PocketBalanceEditor::showSourceMapping()
+{
+    juce::Component::SafePointer<PocketBalanceEditor> editor(this);
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(new SourceMappingPanel(owner,
+        [editor](int track, int slot, const std::array<int, pocket::laneCount>& mapping)
+        { if (editor != nullptr) editor->owner.setSourceMapping(track, slot, mapping); },
+        [editor] { if (editor != nullptr) editor->owner.clearSourceMapping(); }));
+    options.dialogTitle = "FL source names";
+    options.dialogBackgroundColour = background;
+    options.componentToCentreAround = this;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.escapeKeyTriggersCloseButton = true;
+    options.launchAsync();
+}
 void PocketBalanceEditor::refreshDisplay()
 {
+    sourceSyncStatus.setText(owner.sourceSyncStatus(), juce::dontSendNotification);
     const int modelView = juce::jlimit(1, 2, int(owner.parameters.state.getProperty("analysisView", 1)));
     // Preserve a queued user selection when the saved model has not changed.
     if (modelView != observedAnalysisView)
@@ -357,7 +471,10 @@ void PocketBalanceEditor::showRouting()
         "Changed levels, roles, mute, solo, ducking, or input connections require a fresh Listen. Similar-level findings are informational. "
         "Shared frequencies can be intentional. This analysis reports possible masking, not a guaranteed problem or cure. Compare by ear.\n\n"
         "BYPASS: Use Bypass balance inside this plugin to keep all inputs audible. FL's power switch skips the multi-input mixer and may leave only input 01 audible.\n\n"
-        "NAMES: Double-click a Source label. Auto infers its role from words like kick, 808, snare or hat. Choose a role manually to turn Auto off. FL does not send routed source names to VST3 effects.\n\n"
+        "NAMES: Enable the Pocket Balance Source Sync controller script in FL MIDI settings. Click FL source names and match each input to its Mixer track. "
+        "Mixer names then update automatically. These updates preserve roles, Auto preferences, and audio settings. "
+        "Re-link after changing Wrapper connections or copying a plugin preset. Other hosts keep manual source names. "
+        "Double-click a Source label for manual naming. Auto infers a role only when you manually edit a label or click Auto.\n\n"
         "OTHER HOSTS\n"
         "Route separate mono or stereo sources to this effect's input buses. Your host must support multiple auxiliary inputs."
         " A mixed stereo drum loop cannot be separated by this plugin.\n\n"

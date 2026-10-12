@@ -5,6 +5,7 @@ on:
     paths:
       - 'Source/**'
       - 'Tests/**'
+      - 'FLStudio/**'
       - 'CMakeLists.txt'
       - 'scripts/**'
       - 'LICENSE'
@@ -32,6 +33,8 @@ jobs:
         run: cmake --build build --config Release --parallel 3
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Test FL companion
+        run: python -B -m unittest discover -s Tests -p '*SourceSync*.py'
       - name: Package plugins and corresponding source
         run: python scripts/Package.py --build build --output package
       - uses: actions/upload-artifact@v4

@@ -2,11 +2,11 @@
 
 A native drum mixer for FL Studio and other hosts with multiple plugin inputs.
 
-**Version 0.3.0:** 16 separate drum inputs, one stereo output, an eight-second listen-and-balance workflow, and a live waveform display.
+**Version 0.4.0:** adds FL Mixer source-name synchronization to the 16-input drum mixer, balance suggestions, and frequency-clash workflow.
 The plugin suggests levels. You keep control of the mix.
 
 Download the [0.3.0 prerelease for Mac or Windows](https://github.com/dylanmccavitt/pocket-balance/releases/tag/v0.3.0).
-Live FL Studio verification remains incomplete; see the [validation record](docs/validation-0.3.md).
+Version 0.4.0 is undergoing host validation. See the [0.3 validation record](docs/validation-0.3.md) for the previous release.
 
 ![Frequency clash analysis and reversible preview](docs/frequency-clashes.png)
 
@@ -15,6 +15,7 @@ Live FL Studio verification remains incomplete; see the [validation record](docs
 - Handles up to 16 mono or stereo sources per instance.
 - Suggests conservative levels for kicks, 808s, snares, claps, hats, percussion, cymbals, and other sounds.
 - Provides manual gain, mute, solo, input meters, and editable names for each source.
+- Follows FL Mixer names through an optional controller script and saved input mappings. Name updates preserve roles and audio settings.
 - Measures repeated frequency overlap between simultaneously active drums.
 - Offers a reversible preview and one optional dynamic frequency correction, limited to 3 dB.
 - Offers adjustable kick-to-808 ducking.
@@ -131,8 +132,13 @@ Other DAWs must expose multiple auxiliary input buses. Routing support varies by
 ## Source labels and roles
 
 FL Studio's VST3 connections do not supply routed Mixer-track or sample names to this plugin.
-Name the lanes with the saved **Source** labels so they match your routing.
-The **Auto role from label** option can suggest a musical role from a recognizable label; you can choose a role manually to override it.
+Install the optional **Pocket Balance Source Sync** controller script, then click **FL source names** to map each input to its Mixer track.
+The companion reads actual Mixer names and refreshes the corresponding **Source** labels. Follow the [setup guide](docs/fl-source-sync.md).
+The mapping saves with the project. Re-link after changing Wrapper assignments, moving the plugin, or copying a preset into another project.
+FL does not expose Wrapper input assignments to scripts, so these must be matched once during setup.
+
+Other hosts retain manual source labels. Double-click a label to edit it; unlink synchronized labels before using manual names.
+The **Auto** option infers a role when you manually edit a label or click Auto. Automatic Mixer name updates preserve the current role and Auto preference.
 Matching uses whole words and ignores case. A specific label such as `808 Clap` is treated as a clap; unknown or conflicting labels do not force a new role.
 Labels and musical roles are separate from the host input numbers, which stay fixed.
 

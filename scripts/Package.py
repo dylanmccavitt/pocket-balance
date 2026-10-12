@@ -40,7 +40,8 @@ def main():
     if not bundles:
         raise SystemExit('No Release VST3/AU bundles found. Build and test first.')
     source_names = ['CMakeLists.txt'] + [p.relative_to(root).as_posix()
-        for folder in ['Source', 'Tests'] for p in (root / folder).rglob('*') if p.is_file()]
+        for folder in ['Source', 'Tests', 'FLStudio'] for p in (root / folder).rglob('*')
+        if p.is_file() and '__pycache__' not in p.parts and p.suffix != '.pyc']
     signature = tree_signature(root, source_names)
     version = re.search(r'project\(PocketBalance VERSION ([0-9.]+)', (root / 'CMakeLists.txt').read_text()).group(1)
     for bundle in bundles:
@@ -62,6 +63,9 @@ def main():
             shutil.copy2(bundle, output / bundle.name)
     for name in ['README.md', 'LICENSE', 'THIRD_PARTY.md']:
         shutil.copy2(root / name, output / name)
+    if (root / 'FLStudio').is_dir():
+        shutil.copytree(root / 'FLStudio', output / 'FLStudio',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copy2(juce / 'LICENSE.md', output / 'JUCE-LICENSE.md')
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode().split('\0')
     with zipfile.ZipFile(output / 'Pocket-Balance-corresponding-source.zip', 'w', zipfile.ZIP_DEFLATED) as archive:

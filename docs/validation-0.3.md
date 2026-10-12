@@ -27,7 +27,8 @@ The applied-correction status subsequently displayed an active 2.0 dB reduction.
 
 The earlier white image was a remote-view limitation. Isolated zero readings from FL's current-peak API did not establish silence.
 The comparison with 0.2.0 did not establish a plugin regression. Version 0.3.0 remains installed.
-Audible playback and the complete Preview/Undo interaction sequence still require confirmation in FL Studio.
+The user subsequently confirmed hearing both the drums and 808 clearly through Pocket Balance.
+The complete Preview/Undo interaction sequence still requires live confirmation in FL Studio.
 The previous plugin and original project remain backed up.
 
 ## Limits
