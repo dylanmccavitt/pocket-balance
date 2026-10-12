@@ -5,6 +5,9 @@ A native drum mixer for FL Studio and other hosts with multiple plugin inputs.
 **Version 0.3.0:** 16 separate drum inputs, one stereo output, an eight-second listen-and-balance workflow, and a live waveform display.
 The plugin suggests levels. You keep control of the mix.
 
+Download the [0.3.0 prerelease for Mac or Windows](https://github.com/dylanmccavitt/pocket-balance/releases/tag/v0.3.0).
+Live FL Studio verification remains incomplete; see the [validation record](docs/validation-0.3.md).
+
 ![Frequency clash analysis and reversible preview](docs/frequency-clashes.png)
 
 ## What it does
@@ -28,7 +31,8 @@ Use additional instances for more than 16 sources. Each instance balances its ow
 
 Mac VST3, Audio Unit, and standalone targets are provided. The Mac build targets Apple Silicon and Intel.
 Windows VST3 and standalone targets use the same source, with a native Windows build script.
-Version 0.3.0 passes the universal Mac build, four CTest suites, and pluginval strictness 5 for VST3 and AU.
+Version 0.3.0 passes native Mac universal and Windows x64 builds, with four CTest suites on each platform.
+The Mac VST3 and AU also pass pluginval strictness 5.
 See [validation details](docs/validation-0.3.md) and [GitHub Actions](https://github.com/dylanmccavitt/pocket-balance/actions) for platform results and limits.
 The standalone application is for development and audio-interface inputs; it does not receive tracks from another DAW.
 
