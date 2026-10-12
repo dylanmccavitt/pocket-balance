@@ -165,9 +165,9 @@ public:
         g.setColour(juce::Colour(0xff29372f)); g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 10, 1);
         g.setColour(juce::Colour(0xffc3ec85));
         g.setFont(juce::Font(juce::FontOptions(12, juce::Font::bold)));
-        g.drawText("FREQUENCY CLASHES", { 16, 10, 194, 25 }, juce::Justification::centredLeft);
+        g.drawText("FREQUENCY CLASHES", juce::Rectangle<int> { 16, 10, 194, 25 }, juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xffa3b1a7)); g.setFont(juce::Font(juce::FontOptions(11)));
-        g.drawText("Depth", { 178, 122, 43, 30 }, juce::Justification::centredLeft);
+        g.drawText("Depth", juce::Rectangle<int> { 178, 122, 43, 30 }, juce::Justification::centredLeft);
     }
 
 private:
