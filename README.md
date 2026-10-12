@@ -143,7 +143,7 @@ It keeps a bounded recent history rather than recording a file.
 - **Freeze:** hold the displayed history for inspection while audio continues normally.
 
 The graph is a compact waveform overview, not a sample-accurate editor, spectrum analyzer, or automatic correction tool.
-Final live dropdown and state checks are recorded in `VALIDATION.txt`.
+Host tests cover dropdown changes and saved display settings.
 
 ## Balance a loop
 

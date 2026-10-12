@@ -56,6 +56,23 @@ if(POCKET_BUILD_PLUGIN)
     JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
   target_link_libraries(PocketBalance PRIVATE juce::juce_audio_utils
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+  foreach(FORMAT VST3 AU)
+    if(TARGET PocketBalance_${FORMAT})
+      if(FORMAT STREQUAL "AU")
+        set(POCKET_BUNDLE_EXTENSION component)
+      else()
+        set(POCKET_BUNDLE_EXTENSION vst3)
+      endif()
+      add_custom_command(TARGET PocketBalance_${FORMAT} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}"
+          "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+          "-DBUNDLE_PATH=${CMAKE_CURRENT_BINARY_DIR}/PocketBalance_artefacts/$<CONFIG>/${FORMAT}/Pocket Balance.${POCKET_BUNDLE_EXTENSION}"
+          "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/PocketBalance-${FORMAT}-manifest.json"
+          "-DVERSION=${PROJECT_VERSION}"
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/scripts/WriteManifest.cmake"
+        VERBATIM)
+    endif()
+  endforeach()
   if(BUILD_TESTING)
     juce_add_console_app(PocketHostTests PRODUCT_NAME "Pocket Host Tests")
     get_target_property(POCKET_TEST_DEFINITIONS PocketHostTests COMPILE_DEFINITIONS)

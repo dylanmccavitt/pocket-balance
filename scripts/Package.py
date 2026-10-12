@@ -3,9 +3,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from pathlib import Path
 import argparse
+import hashlib
+import json
+import re
 import shutil
 import subprocess
 import zipfile
+
+
+def tree_signature(root, names):
+    lines = []
+    for name in sorted(names):
+        path = root / name
+        if path.is_file():
+            lines.append(name + ':' + hashlib.sha256(path.read_bytes()).hexdigest() + '\n')
+    return hashlib.sha256(''.join(lines).encode()).hexdigest()
 
 
 def main():
@@ -27,6 +39,21 @@ def main():
     bundles = list((artifacts / 'VST3').glob('*.vst3')) + list((artifacts / 'AU').glob('*.component'))
     if not bundles:
         raise SystemExit('No Release VST3/AU bundles found. Build and test first.')
+    source_names = ['CMakeLists.txt'] + [p.relative_to(root).as_posix()
+        for folder in ['Source', 'Tests'] for p in (root / folder).rglob('*') if p.is_file()]
+    signature = tree_signature(root, source_names)
+    version = re.search(r'project\(PocketBalance VERSION ([0-9.]+)', (root / 'CMakeLists.txt').read_text()).group(1)
+    for bundle in bundles:
+        fmt = 'AU' if bundle.suffix == '.component' else 'VST3'
+        manifest_path = build / ('PocketBalance-' + fmt + '-manifest.json')
+        if not manifest_path.is_file():
+            raise SystemExit('Build manifest missing. Rebuild this source before packaging: ' + str(bundle))
+        manifest = json.loads(manifest_path.read_text())
+        names = [p.relative_to(bundle).as_posix() for p in bundle.rglob('*') if p.is_file()]
+        if manifest.get('version') != version or manifest.get('source_sha256') != signature:
+            raise SystemExit('Built source/version does not match current source. Rebuild before packaging.')
+        if manifest.get('bundle_sha256') != tree_signature(bundle, names):
+            raise SystemExit('Plugin bundle changed since its successful build. Rebuild before packaging.')
     output.mkdir(parents=True, exist_ok=True)
     for bundle in bundles:
         if bundle.is_dir():
