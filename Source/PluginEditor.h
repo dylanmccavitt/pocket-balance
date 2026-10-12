@@ -2,6 +2,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
 #include "WaveformView.h"
+#include "ClashView.h"
 
 class PocketLookAndFeel : public juce::LookAndFeel_V4
 {
@@ -43,10 +44,14 @@ private:
     void timerCallback() override;
     void showRouting();
     void selectPage(int);
+    void selectAnalysisView(int);
     PocketBalanceProcessor& owner;
     PocketLookAndFeel look;
     juce::TooltipWindow tooltip { this, 600 };
     WaveformView waveforms;
+    ClashView clashes;
+    juce::ComboBox analysisView;
+    int observedAnalysisView = 1;
     std::array<std::unique_ptr<Lane>, pocket::laneCount> lanes;
     juce::TextButton listen { "Listen  /  8 seconds" }, apply { "Apply balance" }, undo { "Undo levels" };
     juce::TextButton compare { "Bypass balance" }, reset { "Reset levels" }, help { "Routing guide" };

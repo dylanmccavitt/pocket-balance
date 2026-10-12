@@ -169,10 +169,26 @@ void PocketBalanceEditor::Lane::updateIdentity()
     }
 }
 
-PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProcessorEditor(&p), owner(p), waveforms(p)
+PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProcessorEditor(&p), owner(p), waveforms(p), clashes(p)
 {
     setLookAndFeel(&look);
     addAndMakeVisible(waveforms);
+    addChildComponent(clashes);
+    analysisView.setName("analysis_view");
+    analysisView.addItem("Waveforms", 1); analysisView.addItem("Frequency clashes", 2);
+    analysisView.setTooltip("View live waveforms or review frequency overlap from the latest Listen capture. Switching views stops a correction preview.");
+    observedAnalysisView = juce::jlimit(1, 2, int(owner.parameters.state.getProperty("analysisView", 1)));
+    analysisView.setSelectedId(observedAnalysisView, juce::dontSendNotification);
+    analysisView.onChange = [this]
+    {
+        const int selected = analysisView.getSelectedId();
+        if (selected == observedAnalysisView) return;
+        observedAnalysisView = selected;
+        owner.parameters.state.setProperty("analysisView", selected, nullptr);
+        selectAnalysisView(selected);
+    };
+    addAndMakeVisible(analysisView);
+    selectAnalysisView(observedAnalysisView);
     for (int i = 0; i < pocket::laneCount; ++i) { lanes[size_t(i)] = std::make_unique<Lane>(p, i); addChildComponent(lanes[size_t(i)].get()); }
     for (auto* b : { &listen, &apply, &undo, &compare, &reset, &help, &pageOne, &pageTwo, &guard }) addAndMakeVisible(b);
     listen.setColour(juce::TextButton::buttonColourId, accent);
@@ -186,8 +202,8 @@ PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProce
     undo.onClick = [this] { balanceApplied = false; owner.undoBalance(); };
     reset.onClick = [this] { balanceApplied = false; owner.resetLevels(); };
     compare.setClickingTogglesState(true);
-    compare.onClick = [this] { owner.compare.store(compare.getToggleState()); };
-    compare.setTooltip("Bypass balance and kick ducking while keeping all routed drums audible. Output trim, peak guard, mute and solo stay active. Use this instead of FL's plugin power switch, which drops auxiliary inputs.");
+    compare.onClick = [this] { owner.stopClashPreview(); owner.compare.store(compare.getToggleState()); };
+    compare.setTooltip("Bypass balance, kick ducking, and frequency correction while keeping all routed drums audible. Output trim, peak guard, mute and solo stay active. Use this instead of FL's plugin power switch, which drops auxiliary inputs.");
     reset.setTooltip("Reset all drum levels, mute, and solo. Undo restores the previous levels.");
     help.onClick = [this] { showRouting(); };
     pageOne.onClick = [this] { selectPage(0); }; pageTwo.onClick = [this] { selectPage(1); };
@@ -206,7 +222,13 @@ PocketBalanceEditor::PocketBalanceEditor(PocketBalanceProcessor& p) : AudioProce
     setResizable(true, true); setResizeLimits(1120, 880, 1600, 1100); setSize(1200, 900);
     selectPage(0); timerCallback(); startTimerHz(30);
 }
-PocketBalanceEditor::~PocketBalanceEditor() { stopTimer(); setLookAndFeel(nullptr); }
+PocketBalanceEditor::~PocketBalanceEditor() { stopTimer(); owner.stopClashPreview(); setLookAndFeel(nullptr); }
+void PocketBalanceEditor::selectAnalysisView(int value)
+{
+    owner.stopClashPreview();
+    waveforms.setVisible(value == 1); clashes.setVisible(value == 2);
+    clashes.refresh();
+}
 void PocketBalanceEditor::selectPage(int value)
 {
     page = value; pageOne.setToggleState(page == 0, juce::dontSendNotification); pageTwo.setToggleState(page == 1, juce::dontSendNotification);
@@ -220,7 +242,7 @@ void PocketBalanceEditor::paint(juce::Graphics& g)
     text(g, "POCKET", { 24, 8, 225, 42 }, 32, ink, true);
     text(g, "B A L A N C E", { 26, 47, 210, 21 }, 11, accent);
     text(g, "See the groove. Find the space.", { 235, 19, 460, 27 }, 19, muted);
-    text(g, "16 INPUTS  /  STEREO OUT", { 235, 48, 340, 18 }, 10, muted);
+    text(g, "16 INPUTS  /  STEREO OUT", { 235, 48, 245, 18 }, 10, muted);
     text(g, "OUTPUT", { w - 268, 24, 80, 20 }, 11, muted);
     const float peak = owner.outputPeak.load();
     text(g, peak > 0.00001f ? juce::String(pocket::dbFromGain(peak), 1) + " dBFS" : "-- dBFS",
@@ -263,7 +285,9 @@ void PocketBalanceEditor::paint(juce::Graphics& g)
 void PocketBalanceEditor::resized()
 {
     const int w = getWidth();
+    analysisView.setBounds(w - 610, 43, 280, 28);
     waveforms.setBounds(24, 82, w - 48, 210);
+    clashes.setBounds(waveforms.getBounds());
     listen.setBounds(40, 323, 178, 39); apply.setBounds(230, 323, 164, 39);
     undo.setBounds(406, 323, 138, 39);
     help.setBounds(w - 152, 392, 128, 28);
@@ -281,7 +305,16 @@ void PocketBalanceEditor::timerCallback()
 { refreshDisplay(); }
 void PocketBalanceEditor::refreshDisplay()
 {
+    const int modelView = juce::jlimit(1, 2, int(owner.parameters.state.getProperty("analysisView", 1)));
+    // Preserve a queued user selection when the saved model has not changed.
+    if (modelView != observedAnalysisView)
+    {
+        observedAnalysisView = modelView;
+        analysisView.setSelectedId(modelView, juce::dontSendNotification);
+        selectAnalysisView(modelView);
+    }
     waveforms.refresh();
+    clashes.refresh();
     const auto suggestions = owner.getSuggestions();
     for (auto& lane : lanes) lane->refresh(suggestions, owner.value("amount") * 0.01f);
     const bool learning = owner.isLearning();
@@ -289,6 +322,7 @@ void PocketBalanceEditor::refreshDisplay()
     for (int i = 0; i < pocket::laneCount; ++i)
         if (std::abs(owner.value(owner.laneId(i, "role")) - appliedRoles[size_t(i)]) > 0.1f) balanceApplied = false;
     listen.setButtonText(learning ? "Cancel listening" : "Listen  /  8 seconds");
+    listen.setEnabled(learning || !owner.compare.load());
     apply.setEnabled(!learning && suggestions.activeLanes >= 2);
     undo.setEnabled(owner.canUndoBalance());
     compare.setToggleState(owner.compare.load(), juce::dontSendNotification);
@@ -314,10 +348,20 @@ void PocketBalanceEditor::showRouting()
         " Input 01 stays enabled and must contain only the first drum.\n\n"
         "5. Keep the Pocket bus routed to Master. Check that each drum lights up just one input meter. Name the lanes and choose roles.\n\n"
         "6. Play a representative loop. Press Listen, review the suggested levels, then Apply balance. Adjust to taste.\n\n"
+        "FREQUENCY CLASHES: Select Frequency clashes above the analysis panel. Listen measures simultaneous band overlap and relative levels. "
+        "Select a finding and read the named source to reduce. Preview correction temporarily applies up to 3 dB of dynamic band reduction. "
+        "Apply correction keeps the preview. One correction can be active; applying another replaces it. Undo correction restores the previous setting. "
+        "Disable correction turns it off and is also undoable. Closing the editor or switching views stops a preview; applied corrections remain. "
+        "Changed levels, roles, mute, solo, ducking, or input connections require a fresh Listen. Similar-level findings are informational. "
+        "Shared frequencies can be intentional. This analysis reports possible masking, not a guaranteed problem or cure. Compare by ear.\n\n"
         "BYPASS: Use Bypass balance inside this plugin to keep all inputs audible. FL's power switch skips the multi-input mixer and may leave only input 01 audible.\n\n"
         "NAMES: Double-click a Source label. Auto infers its role from words like kick, 808, snare or hat. Choose a role manually to turn Auto off. FL does not send routed source names to VST3 effects.\n\n"
         "OTHER HOSTS\n"
         "Route separate mono or stereo sources to this effect's input buses. Your host must support multiple auxiliary inputs."
         " A mixed stereo drum loop cannot be separated by this plugin.\n\n"
-        "Use more instances for more than 16 sources. Each instance balances its own group.", "Got it", this);
+        "Use more instances for more than 16 sources. Each instance balances its own group.\n\n"
+        "LICENSE AND SOURCE\n"
+        "Copyright 2026 Pocket Balance contributors. Licensed under AGPL-3.0-only. "
+        "This program comes with no warranty, including no implied warranty of merchantability or fitness for a particular purpose.\n"
+        "Source: https://github.com/dylanmccavitt/pocket-balance", "Got it", this);
 }
