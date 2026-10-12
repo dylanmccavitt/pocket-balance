@@ -7,7 +7,7 @@ import types
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "FLStudio/PocketBalanceSourceSync/device_PocketBalanceSourceSync.py"
-for name in ("mixer", "plugins", "general"):
+for name in ("mixer", "plugins", "general", "transport"):
     sys.modules[name] = types.ModuleType(name)
 spec = importlib.util.spec_from_file_location("source_sync_companion", SCRIPT)
 sync = importlib.util.module_from_spec(spec)
@@ -243,6 +243,7 @@ class FakeHost:
         self.writes = []
         self.param_reads = []
         self.safe = True
+        self.recording = False
         self.add(20, 0, {0: 12, 3: 14, 7: 18})
         sync.mixer.trackCount = lambda: self.count
         sync.mixer.getActiveEffectIndex = lambda: self.focus
@@ -255,6 +256,7 @@ class FakeHost:
         sync.plugins.getParamValue = self.param_value
         sync.plugins.setParamValue = self.set_value
         sync.general.safeToEdit = lambda: self.safe
+        sync.transport.isRecording = lambda: self.recording
 
     def add(self, track, slot, mapping, revision=11):
         # Model FL's inserted bypass, so discovery cannot use raw JUCE indices.
@@ -397,6 +399,51 @@ class HostTests(unittest.TestCase):
         host.drive(companion, 350)
         for slot in range(1, 7):
             self.assertEqual(host.instances[(20, slot)]["receiver"].names, {slot: (13, "Closed Hat")})
+
+    def test_recording_pauses_active_stream_then_refreshes_names(self):
+        host = FakeHost()
+        companion = sync.Companion()
+        host.drive(companion, 55)
+        self.assertTrue(host.writes)
+        before = len(host.writes)
+        host.recording = True
+        host.track_names[12] = "Kick during recording"
+        host.drive(companion, 200)
+        self.assertEqual(len(host.writes), before)
+        self.assertEqual(companion.links, {})
+        self.assertTrue(companion.recording)
+        host.recording = False
+        host.drive(companion, 60)
+        self.assertFalse(companion.recording)
+        self.assertEqual(host.instances[(20, 0)]["receiver"].names[0], (12, "Kick during recording"))
+        self.assertEqual((int(host.writes[before][3] * sync.SCALE) >> 20) & 7, sync.RESET)
+
+    def test_recording_from_start_sends_no_metadata(self):
+        host = FakeHost()
+        host.recording = True
+        companion = sync.Companion()
+        host.drive(companion, 100)
+        self.assertEqual(host.writes, [])
+        host.recording = False
+        host.focus = (20, 0)
+        host.drive(companion, 60)
+        self.assertEqual(host.instances[(20, 0)]["receiver"].names[0], (12, "Kick"))
+
+    def test_recording_is_checked_again_at_setter_boundary(self):
+        host = FakeHost()
+        companion = sync.Companion()
+        host.drive(companion, 100)
+        host.track_names[12] = "New Kick"
+        companion.request_refresh()
+        calls = []
+        def recording_starts():
+            calls.append(True)
+            return len(calls) >= 2
+        sync.transport.isRecording = recording_starts
+        before = len(host.writes)
+        companion.idle()
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(len(host.writes), before)
 
     def test_wrong_owner_unlinked_and_unsafe_host_do_not_write(self):
         host = FakeHost()

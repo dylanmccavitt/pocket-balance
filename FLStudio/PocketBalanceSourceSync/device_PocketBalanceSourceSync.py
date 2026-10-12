@@ -9,6 +9,7 @@ Transport uses exactly representable 24-bit values and acknowledged packets.
 import mixer
 import plugins
 import general
+import transport
 
 SCALE = 16777216
 PHASE = 8388608
@@ -213,6 +214,7 @@ class Companion:
         self.scan_after = 0
         self.refresh_requested = True
         self.loading = False
+        self.recording = False
         self.link_cursor = 0
 
     def clear(self, loading=False):
@@ -223,6 +225,7 @@ class Companion:
         self.scan_after = 0
         self.refresh_requested = True
         self.loading = loading
+        self.recording = False
 
     def request_refresh(self):
         # Never rewind an ongoing scan: parameter ACKs can trigger OnRefresh.
@@ -246,6 +249,14 @@ class Companion:
     def _read_context(track, slot, indices):
         return decode_word(plugins.getParamValue(indices[CONTEXT_NAME], track, slot))
 
+    @staticmethod
+    def _write_packet(value, index, track, slot):
+        # Check again at the setter boundary. Metadata is carried through host
+        # parameters and must not become a recorded automation performance.
+        if transport.isRecording() or not general.safeToEdit():
+            raise RuntimeError("Source-name updates paused")
+        plugins.setParamValue(value, index, track, slot, 0)
+
     def _discover(self, track, slot):
         key = (track, slot)
         if not plugins.isValid(track, slot) or plugins.getPluginName(track, slot, 0) != "Pocket Balance":
@@ -267,7 +278,7 @@ class Companion:
             return
         self.links[key] = Link(track, slot, indices, context,
             lambda: plugins.getParamValue(indices[ACK_NAME], track, slot),
-            lambda value: plugins.setParamValue(value, indices[PACKET_NAME], track, slot, 0))
+            lambda value: self._write_packet(value, indices[PACKET_NAME], track, slot))
 
     def _try_discover(self, key):
         try:
@@ -334,7 +345,21 @@ class Companion:
 
     def idle(self):
         self.tick += 1
-        if self.loading or not general.safeToEdit():
+        if self.loading:
+            return
+        if transport.isRecording():
+            # Drop partially sent frames, while keeping known instance slots.
+            self.links.clear()
+            self.recording = True
+            return
+        if self.recording:
+            self.recording = False
+            self.links.clear()
+            self.known_slots = {key: 0 for key in self.known_slots}
+            self.focus_after = 0
+            self.scan_after = 0
+            self.request_refresh()
+        if not general.safeToEdit():
             return
         self._scan()
         current = list(self.links.items())

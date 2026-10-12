@@ -77,6 +77,7 @@ The **Follow FL Mixer names** panel accepts Mixer tracks **0–500**. Track **0*
 ## Behavior and limits
 
 - Mixer renaming updates mapped source labels after the companion processes the change.
+- Name synchronization pauses while FL Studio records. It restarts with fresh names when recording stops.
 - Labels retain up to 256 UTF-8 bytes without splitting a character. Leading and trailing spaces are preserved.
 - Empty or whitespace-only Mixer names use `Mixer N` as a fallback label. Embedded NUL characters are removed.
 - A source must have an active route to the plugin's owner track.
@@ -102,7 +103,8 @@ If names do not update, check these items in order:
 4. Confirm the owner Mixer track and effect slot match the loaded plugin.
 5. Confirm the source mapping matches the Wrapper input assignment.
 6. Confirm the source has an active route to the owner track.
-7. Check **View > Script output** for a script error.
+7. Stop recording before checking name synchronization.
+8. Check **View > Script output** for a script error.
 
 If several companion inputs are enabled, keep only one enabled. Two scripts can compete for the same metadata stream.
 Keep the script and plugin from the same release. Older Pocket Balance versions do not contain the required metadata interface.
@@ -120,5 +122,5 @@ python3 -m unittest discover -s Tests -p '*SourceSync*.py'
 ```
 
 The tests use mock FL modules. They cover Unicode framing, CRC, ACK delays, retries, recovery, route removal, explicit mapping gaps,
-multiple instances, slot replacement, project loading, bounded scanning, and unchanged audio parameter indices.
+multiple instances, slot replacement, project loading, bounded scanning, recording suspension, and unchanged audio parameter indices.
 Mock tests do not establish live FL Studio transport compatibility. Record live host validation separately.
