@@ -86,11 +86,13 @@ The **Follow FL Mixer names** panel accepts Mixer tracks **0–500**. Track **0*
 - The companion periodically restores mapped Mixer names if a linked label is edited manually.
 - Click **Unlink names** before using manual source labels.
 - Moving the plugin to another Mixer track or effect slot requires updating its owner settings.
-- Changing Wrapper input assignments requires updating the saved source mapping.
+- Adding, removing, or changing incoming routes requires checking Wrapper assignments and relinking the saved source mapping.
+- Copying a plugin preset into another project requires checking and relinking its mapping.
 - Sidechain and normal routes can both be active. Route detection alone does not identify the correct plugin input.
 - This companion supports FL Studio. Other hosts retain manual source labels.
 
 A successful name update does not prove that an input carries the correct audio. Play one source at a time and check its input meter.
+The companion cannot identify every routing edit that changes FL's input numbering. It does not automatically remap plugin inputs.
 The companion does not read audio, project files, sample paths, or network services.
 
 ## Troubleshooting

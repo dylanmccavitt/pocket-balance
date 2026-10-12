@@ -94,7 +94,7 @@ public:
             text(g, juce::String(i + 1).paddedLeft('0', 2) + "  " + names[size_t(i)],
                  { 24 + (i / 8) * 330, 200 + (i % 8) * 36, 218, 28 }, 12);
         g.setColour(muted); g.setFont(font(12));
-        g.drawFittedText("Leave unused inputs blank. Re-link after changing Wrapper connections.\n"
+        g.drawFittedText("Leave unused inputs blank. Re-link after routing changes or preset copying.\n"
                         "This mapping saves with the project. It does not change audio routing.",
                         { 24, 498, 612, 40 }, juce::Justification::topLeft, 2);
         text(g, error, { 24, 542, 612, 24 }, 12, orange);
