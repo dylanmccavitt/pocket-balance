@@ -20,11 +20,15 @@ Date: October 12, 2026.
 The installed Mac VST3 loaded the five new correction parameters. Existing lane parameters and seven drum routes survived recall.
 Both installed Mac formats report version 0.3.0 and pass local signature verification.
 
-The remote FL Studio editor view remained white. The drum bus reported zero output during the test loop.
-A controlled comparison with the saved 0.2.0 binary and unchanged pre-update project reproduced both observations.
-This comparison does not establish a new 0.3 regression, but the live session check remains incomplete.
-The test did not establish audible playback or verify Preview in FL Studio.
-Version 0.3.0 was restored after comparison. The previous plugin and original project remain backed up.
+The user confirmed that the dark editor controls were visible locally during the earlier white remote captures.
+A subsequent remote inspection also displayed the complete 0.3.0 editor and an active output meter.
+The live capture measured eight inputs and reported three possible masking findings.
+The applied-correction status subsequently displayed an active 2.0 dB reduction.
+
+The earlier white image was a remote-view limitation. Isolated zero readings from FL's current-peak API did not establish silence.
+The comparison with 0.2.0 did not establish a plugin regression. Version 0.3.0 remains installed.
+Audible playback and the complete Preview/Undo interaction sequence still require confirmation in FL Studio.
+The previous plugin and original project remain backed up.
 
 ## Limits
 
