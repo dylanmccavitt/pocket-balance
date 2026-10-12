@@ -274,12 +274,16 @@ public:
         attack = std::exp(-1.0 / (sampleRate * 0.005));
         release = std::exp(-1.0 / (sampleRate * 0.12));
         detector = std::exp(-1.0 / (sampleRate * 0.01));
+        transitionSamples = std::max(1, int(std::ceil(sampleRate * 0.005)));
         for (int b = 0; b < clashBandCount; ++b)
             bands[size_t(b)] = clashDetail::makeBand(b, sampleRate);
-        const auto previous = config;
+        const auto previous = desired;
         config = {};
-        configure(previous);
+        desired = {};
+        transitionRemaining = 0;
+        suspended = true;
         reset();
+        configure(previous);
     }
 
     void configure(const ClashConfig& requested)
@@ -291,22 +295,34 @@ public:
             && next.band >= 0 && next.band < clashBandCount;
         next.enabled = next.enabled && valid && next.depthDb > 0;
         if (next.enabled) next.enabled = bands[size_t(next.band)].valid;
+        desired = next;
+        desiredMix = (1.0 - std::pow(10.0, -double(next.depthDb) / 20.0)) / (1.0 - fullCutGain);
+        // Keep the latest request while the old routing fades out. Repeated host updates
+        // must not restart this fade or swap a filter while its output is still audible.
+        if (transitionRemaining > 0) return;
         const bool changed = next.source != config.source || next.trigger != config.trigger
             || next.band != config.band || next.enabled != config.enabled;
-        config = next;
-        targetMix = (1.0 - std::pow(10.0, -double(config.depthDb) / 20.0)) / (1.0 - fullCutGain);
-        if (changed) reset();
+        if (!changed)
+        {
+            config.depthDb = next.depthDb;
+            targetMix = desiredMix; // Existing attack smoothing also smooths depth changes.
+        }
+        else if (config.enabled && !suspended && lastReduction > 1.0e-6f)
+            transitionRemaining = transitionSamples;
+        else activateDesired();
     }
 
     void process(std::array<float, laneCount>& left, std::array<float, laneCount>& right,
                  bool bypass = false)
     {
-        if (!config.enabled || bypass)
+        if (bypass)
         {
-            if (!suspended) reset();
+            // Host bypass takes priority over the optional preview fade.
+            if (!suspended || transitionRemaining > 0) activateDesired();
             suspended = true;
-            return; // True transparency: even unrelated lanes are never touched.
+            return;
         }
+        if (!config.enabled) return; // Fresh or fully faded disabled state is exactly transparent.
         suspended = false;
         const auto source = size_t(config.source), trigger = size_t(config.trigger);
         const auto& band = bands[size_t(config.band)];
@@ -322,19 +338,31 @@ public:
         const double coefficient = target > envelope ? attack : release;
         envelope = target + coefficient * (envelope - target);
         mix = targetMix + attack * (mix - targetMix);
-        const float wet = float(std::clamp(mix * envelope, 0.0, 1.0));
+        const double transition = transitionRemaining > 0
+            ? double(transitionRemaining - 1) / transitionSamples : 1.0;
+        const float wet = float(std::clamp(mix * envelope * transition, 0.0, 1.0));
         const float dryL = clean(left[source]), dryR = clean(right[source]);
         const float cutL = sourceFilters[0].process(dryL, band.cut);
         const float cutR = sourceFilters[1].process(dryR, band.cut);
         left[source] = dryL + wet * (cutL - dryL);
         right[source] = dryR + wet * (cutR - dryR);
         lastReduction = float(-20 * std::log10(1.0 - wet * (1.0 - fullCutGain)));
+        if (transitionRemaining > 0 && --transitionRemaining == 0) activateDesired();
     }
 
     // Estimated gain reduction at the band's centre, not a full-band loudness measurement.
     float reductionDb() const { return lastReduction; }
 
 private:
+    void activateDesired()
+    {
+        config = desired;
+        targetMix = desiredMix;
+        transitionRemaining = 0;
+        suspended = true;
+        reset();
+    }
+
     void reset()
     {
         for (auto& channel : triggerFilters) channel.reset();
@@ -343,12 +371,13 @@ private:
         lastReduction = 0;
     }
     static constexpr double fullCutGain = 0.7079457843841379;
-    ClashConfig config;
+    ClashConfig config, desired;
     std::array<clashDetail::Band, clashBandCount> bands {};
     std::array<clashDetail::Biquad, 2> triggerFilters {}, sourceFilters {};
     double sampleRate = 48000, attack = 0, release = 0, detector = 0;
-    double lanePower = 0, bandPower = 0, envelope = 0, mix = 0, targetMix = 0;
+    double lanePower = 0, bandPower = 0, envelope = 0, mix = 0, targetMix = 0, desiredMix = 0;
     float lastReduction = 0;
+    int transitionSamples = 240, transitionRemaining = 0;
     bool suspended = true;
 };
 } // namespace pocket

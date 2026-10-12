@@ -180,6 +180,93 @@ void testAttackAndRelease(double rate)
     require(earlyRelease > 0.1f, "Release retains a smooth tail after the trigger stops");
     require(correction.reductionDb() < 0.001f, "Correction releases fully after trigger silence");
 }
+
+void testConfigurationTransitions(double rate)
+{
+    pocket::ClashCorrection correction;
+    correction.prepare(rate);
+    const pocket::ClashConfig original { true, 0, 1, 1, 3 };
+    correction.configure(original);
+    int sample = 0;
+    auto render = [&](bool bypass = false)
+    {
+        Samples left {}, right {};
+        left[0] = left[1] = tone(sample, rate, 113.13708499);
+        left[2] = left[3] = tone(sample, rate, 452.54833996);
+        left[4] = left[5] = tone(sample, rate, 226.27416998);
+        right = left;
+        for (auto& value : right) value = -value;
+        const auto dry = left;
+        correction.process(left, right, bypass);
+        Samples residual {};
+        for (int i = 0; i < pocket::laneCount; ++i)
+        {
+            near(right[size_t(i)], -left[size_t(i)], 1.0e-7,
+                 "Configuration transitions preserve stereo linking");
+            residual[size_t(i)] = left[size_t(i)] - dry[size_t(i)];
+        }
+        ++sample;
+        return residual;
+    };
+    auto settleAtAudibleCut = [&]()
+    {
+        Samples residual {};
+        const int start = sample;
+        while (sample - start < int(rate * 0.3)) residual = render();
+        for (int n = 0; n < int(rate * 0.02) && std::abs(residual[0]) < 0.05f; ++n) residual = render();
+        require(std::abs(residual[0]) >= 0.05f, "Transition probe begins away from a waveform zero crossing");
+        near(correction.reductionDb(), 3, 0.001, "Transition starts from an audible settled cut");
+        return residual;
+    };
+
+    auto previous = settleAtAudibleCut();
+    auto disabled = original;
+    disabled.enabled = false;
+    correction.configure(disabled);
+    require(correction.reductionDb() > 2.9f, "Disabling schedules a fade instead of resetting the live cut");
+    for (int n = 0; n < int(rate * 0.02); ++n)
+    {
+        // Repeated automation values cannot extend the five-millisecond fade.
+        if (n % 64 == 0) correction.configure(disabled);
+        const auto current = render();
+        require(std::abs(current[0] - previous[0]) < 0.003f,
+                "Disabling cannot introduce an abrupt correction waveform step");
+        if (n == 0) require(std::abs(current[0]) > 0.045f, "The first disabled sample retains the fading old cut");
+        if (n >= int(std::ceil(rate * 0.005)))
+            require(current == Samples {}, "Disabled processing reaches exact transparency after five milliseconds");
+        previous = current;
+    }
+    near(correction.reductionDb(), 0, 0, "A completed disable fade clears the indicator");
+
+    correction.configure(original);
+    previous = settleAtAudibleCut();
+    pocket::ClashConfig desired { true, 2, 3, 3, 3 };
+    correction.configure(desired);
+    double newLaneEnergy = 0;
+    for (int n = 0; n < int(rate * 0.3); ++n)
+    {
+        // A newer request during the old fade replaces the pending pair, without restarting the fade.
+        if (n == int(rate * 0.001)) desired = { true, 4, 5, 2, 3 };
+        correction.configure(desired);
+        const auto current = render();
+        for (int i : { 0, 2, 4 })
+            require(std::abs(current[size_t(i)] - previous[size_t(i)]) < 0.007f,
+                    "Pair and band changes cannot introduce an abrupt correction waveform step");
+        require(current[2] == 0, "A superseded pending pair must never become active");
+        if (n >= int(std::ceil(rate * 0.005)))
+            require(current[0] == 0, "The old source becomes exactly transparent after the transition");
+        if (n > int(rate * 0.2)) newLaneEnergy += current[4] * current[4];
+        previous = current;
+    }
+    require(newLaneEnergy > 0.1, "The latest requested source and band become active");
+    near(correction.reductionDb(), 3, 0.001, "The new correction settles at its requested depth");
+
+    desired.enabled = false;
+    correction.configure(desired);
+    require(render(true) == Samples {}, "Host bypass is immediately transparent even during a pending fade");
+    near(correction.reductionDb(), 0, 0, "Host bypass clears a pending transition immediately");
+    require(render() == Samples {}, "The latest disabled configuration survives host bypass");
+}
 } // namespace
 
 int main()
@@ -227,6 +314,7 @@ int main()
         }
         testTransparency(rate);
         testAttackAndRelease(rate);
+        testConfigurationTransitions(rate);
         near(correctionLevel(rate, 113.13708499, 113.13708499), -2, 0.02,
              "Active correction reaches the requested band-centre depth");
         near(correctionLevel(rate, 113.13708499, 113.13708499, 3, true), -3, 0.02,
@@ -288,5 +376,5 @@ int main()
         require(analyser.finish().count == 0, "Nonfinite samples cannot create evidence");
     }
     std::cout << "PASS: clash evidence, silence, repeats, sustained overlap, bands, ranking, stereo, "
-                 "dynamic cut, bypass, smoothing, invalid inputs at 44.1/48/96 kHz\n";
+                 "dynamic cut, bypass, smoothed configuration changes, invalid inputs at 44.1/48/96 kHz\n";
 }
